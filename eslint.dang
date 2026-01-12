@@ -1,0 +1,52 @@
+type Eslint {
+  """
+  The source directory for the project.
+  """
+  pub source: Directory! @defaultPath(path: "/")
+
+  """
+  The Node base image to use.
+  """
+  pub nodeImage: Container! = container.from("node:25-alpine")
+
+  """
+  Lint the source.
+  """
+  pub lint: Void @check {
+    base.
+    withExec(["npx", "eslint", ".", "--ext", ".js,.jsx"]).
+    sync
+
+    null
+  }
+
+  """
+  Fix linting issues.
+  """
+  pub fix: Changeset {
+    let fixFilter = ["**/*.js", "**/*.ts", "**/*.jsx"]
+
+    let fixed = base.
+    withExec(["npx", "eslint", ".", "--ext", ".js,.jsx", "--fix"]).
+    directory(".").
+    withoutDirectory("node_modules")
+
+    let fixedJs = directory.
+    withDirectory(".", fixed, include: fixFilter)
+
+    let sourceJs = directory.
+    withDirectory(".", source.withoutDirectory("node_modules"), include: fixFilter)
+
+    fixedJs.
+    changes(sourceJs)
+  }
+
+  let base: Container! {
+    nodeImage.
+      withMountedCache("/root/.npm", cacheVolume("node-modules")).
+      withDirectory("/src", source).
+      withWorkdir("/src").
+      withEnvVariable("CI", "true").
+      withExec(["npm", "install"])
+  }
+}
