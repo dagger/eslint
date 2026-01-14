@@ -5,16 +5,17 @@ type Eslint {
   pub source: Directory! @defaultPath(path: "/")
 
   """
-  The Node base image to use.
+  The base image to use.
   """
-  pub nodeImage: Container! = container.from("node:25-alpine")
+  pub baseImageAddress: String! = "node:25-alpine"
 
   """
   Lint the source.
   """
-  pub lint: Void @check {
+  pub lint(extensions: [String!]! = [".js", ".jsx"]): Void @check {
+    let ext = extensions.join(",")
     base.
-    withExec(["npx", "eslint", ".", "--ext", ".js,.jsx"]).
+    withExec(["npx", "eslint", ".", "--ext", ext]).
     sync
 
     null
@@ -23,26 +24,30 @@ type Eslint {
   """
   Fix linting issues.
   """
-  pub fix: Changeset {
-    let fixFilter = ["**/*.js", "**/*.ts", "**/*.jsx"]
+  pub fix(extensions: [String!]! = [".js", ".jsx"]): Changeset {
+    let ext = extensions.join(",")
+    let extFilter = []
+    for (e in extensions) {
+      extFilter = extFilter + ["**/*" + e]
+    }
 
     let fixed = base.
-    withExec(["npx", "eslint", ".", "--ext", ".js,.jsx", "--fix"]).
+    withExec(["npx", "eslint", ".", "--ext", ext, "--fix"]).
     directory(".").
     withoutDirectory("node_modules")
 
     let fixedJs = directory.
-    withDirectory(".", fixed, include: fixFilter)
+    withDirectory(".", fixed, include: extFilter)
 
     let sourceJs = directory.
-    withDirectory(".", source.withoutDirectory("node_modules"), include: fixFilter)
+    withDirectory(".", source.withoutDirectory("node_modules"), include: extFilter)
 
     fixedJs.
     changes(sourceJs)
   }
 
   let base: Container! {
-    nodeImage.
+    container.from(baseImageAddress).
       withMountedCache("/root/.npm", cacheVolume("node-modules")).
       withDirectory("/src", source).
       withWorkdir("/src").
