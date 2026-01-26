@@ -10,11 +10,16 @@ type Eslint {
   pub baseImageAddress: String! = "node:25-alpine"
 
   """
+  The package manager to use.
+  """
+  pub packageManager: String! = "npm"
+
+  """
   Lint the source.
   """
   pub lint(extensions: [String!]! = [".js", ".jsx"]): Void @check {
     let ext = extensions.join(",")
-    base.
+    node(source, baseImageAddress, packageManager).base.
     withExec(["npx", "eslint", ".", "--ext", ext]).
     sync
 
@@ -31,7 +36,7 @@ type Eslint {
       extFilter = extFilter + ["**/*" + e]
     }
 
-    let fixed = base.
+    let fixed = node(source, baseImageAddress, packageManager).base.
     withExec(["npx", "eslint", ".", "--ext", ext, "--fix"]).
     directory(".").
     withoutDirectory("node_modules")
@@ -44,14 +49,5 @@ type Eslint {
 
     fixedJs.
     changes(sourceJs)
-  }
-
-  let base: Container! {
-    container.from(baseImageAddress).
-      withMountedCache("/root/.npm", cacheVolume("node-modules")).
-      withDirectory("/src", source).
-      withWorkdir("/src").
-      withEnvVariable("CI", "true").
-      withExec(["npm", "install"])
   }
 }
