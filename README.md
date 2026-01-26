@@ -39,12 +39,12 @@ The toolchain can be customized in your `dagger.json` to meet your needs:
           "default": "yarn"          # default: npm; alternatively use yarn, pnpm, or bun
         },
         {
-          "function": "lint",
+          "function": ["lint"],
           "argument": "extensions",
           "default": ["**.js"]       # default: [".js", ".jsx"];
         },
         {
-          "function": "fix",
+          "function": ["fix"],
           "argument": "extensions",
           "default": ["**.js"]       # default: [".js", ".jsx"];
         }
