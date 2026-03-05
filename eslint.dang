@@ -31,8 +31,8 @@ type Eslint {
   """
   pub fix(extensions: [String!]! = [".js", ".jsx"]): Changeset {
     let ext = extensions.join(",")
-    let extFilter = []
-    for (e in extensions) {
+    let extFilter = [] :: [String!]!
+    extensions.each { e =>
       extFilter = extFilter + ["**/*" + e]
     }
 
