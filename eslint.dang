@@ -1,8 +1,8 @@
 type Eslint {
   """
-  The workspace source
+  The source directory for the project.
   """
-  pub source: Directory!
+  pub source: Directory! @defaultPath(path: "/")
 
   """
   The base image to use.
@@ -13,12 +13,6 @@ type Eslint {
   The package manager to use.
   """
   pub packageManager: String! = "npm"
-
-
-  new(source: Workspace!) {
-    self.source = source.directory("/")
-    self
-  }
 
   """
   Lint the source.
