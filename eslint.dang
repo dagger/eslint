@@ -1,5 +1,10 @@
 type Eslint {
   """
+  The workspace source
+  """
+  pub source: Directory!
+
+  """
   The base image to use.
   """
   pub baseImageAddress: String! = "node:25-alpine"
@@ -9,12 +14,18 @@ type Eslint {
   """
   pub packageManager: String! = "npm"
 
+
+  new(source: Workspace!) {
+    self.source = source.directory("/")
+    self
+  }
+
   """
   Lint the source.
   """
-  pub lint(extensions: [String!]! = [".js", ".jsx"], source: Workspace!): Void @check {
+  pub lint(extensions: [String!]! = [".js", ".jsx"]): Void @check {
     let ext = extensions.join(",")
-    node(source.directory("/"), baseImageAddress, packageManager).base.
+    node(source, baseImageAddress, packageManager).base.
     withExec(["npx", "eslint", ".", "--ext", ext]).
     sync
 
@@ -24,14 +35,14 @@ type Eslint {
   """
   Fix linting issues.
   """
-  pub fix(extensions: [String!]! = [".js", ".jsx"], source: Workspace!): Changeset {
+  pub fix(extensions: [String!]! = [".js", ".jsx"]): Changeset {
     let ext = extensions.join(",")
     let extFilter = [] :: [String!]!
     extensions.each { e =>
       extFilter = extFilter + ["**/*" + e]
     }
 
-    let fixed = node(source.directory("/"), baseImageAddress, packageManager).base.
+    let fixed = node(source, baseImageAddress, packageManager).base.
     withExec(["npx", "eslint", ".", "--ext", ext, "--fix"]).
     directory(".").
     withoutDirectory("node_modules")
@@ -40,7 +51,7 @@ type Eslint {
     withDirectory(".", fixed, include: extFilter)
 
     let sourceJs = directory.
-    withDirectory(".", source.directory("/").withoutDirectory("node_modules"), include: extFilter)
+    withDirectory(".", source.withoutDirectory("node_modules"), include: extFilter)
 
     fixedJs.
     changes(sourceJs)
