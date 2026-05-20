@@ -28,11 +28,11 @@ type Eslint {
   """
   Lint the source.
   """
-  pub lint(extensions: [String!]! = [".js", ".jsx"]): Void @check {
-    let ext = extensions.join(",")
-    node(source, baseImageAddress, packageManager).base.
-    withExec(["npx", "eslint", ".", "--ext", ext]).
-    sync
+  pub lint: Void @check {
+    node(source, baseImageAddress, packageManager)
+      .base
+      .withExec(["npx", "eslint", "."])
+      .sync
 
     null
   }
@@ -40,25 +40,14 @@ type Eslint {
   """
   Fix linting issues.
   """
-  pub fix(extensions: [String!]! = [".js", ".jsx"]): Changeset {
-    let ext = extensions.join(",")
-    let extFilter = [] :: [String!]!
-    extensions.each { e =>
-      extFilter = extFilter + ["**/*" + e]
-    }
+  pub fix: Changeset {
+    let fixed = node(source, baseImageAddress, packageManager)
+      .base
+      .withExec(["npx", "eslint", ".", "--fix"])
+      .directory(".")
+      .withoutDirectory("node_modules")
 
-    let fixed = node(source, baseImageAddress, packageManager).base.
-    withExec(["npx", "eslint", ".", "--ext", ext, "--fix"]).
-    directory(".").
-    withoutDirectory("node_modules")
-
-    let fixedJs = directory.
-    withDirectory(".", fixed, include: extFilter)
-
-    let sourceJs = directory.
-    withDirectory(".", source.withoutDirectory("node_modules"), include: extFilter)
-
-    fixedJs.
-    changes(sourceJs)
+    fixed
+      .changes(source.withoutDirectory("node_modules"))
   }
 }
