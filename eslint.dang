@@ -29,7 +29,7 @@ type Eslint {
   Lint the source.
   """
   pub lint: Void @check {
-    node(source, baseImageAddress, packageManager)
+    nodejs(source, baseImageAddress, packageManager)
       .base
       .withExec(["npx", "eslint", "."])
       .sync
@@ -41,7 +41,7 @@ type Eslint {
   Fix linting issues.
   """
   pub fix: Changeset {
-    let fixed = node(source, baseImageAddress, packageManager)
+    let fixed = nodejs(source, baseImageAddress, packageManager)
       .base
       .withExec(["npx", "eslint", ".", "--fix"])
       .directory(".")
