@@ -1,0 +1,21 @@
+"""
+End-to-end checks for the eslint toolchain.
+"""
+type E2e {
+  """
+  The git repository to lint as an end-to-end smoke test.
+  """
+  pub repo: String! = "https://github.com/kpenfound/demo-react-app"
+
+  """
+  Run the eslint toolchain against a real-world repository.
+
+  This pulls the demo repo, exposes it as a Workspace, and runs the
+  eslint `lint` check against it end-to-end.
+  """
+  pub lintDemoApp: Void @check {
+    let ws = git(repo).head.tree.asWorkspace
+
+    eslint(ws).lint
+  }
+}
