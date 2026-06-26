@@ -32,11 +32,11 @@ The toolchain can be customized in your `dagger.json` to meet your needs:
         },
         {
           "argument": "baseImageAddress",
-          "default": "node:22"       # default: node:25-alpine; use any container image 
+          "default": "node:22"       # default: inferred from package manager; use any container image
         },
         {
           "argument": "packageManager",
-          "default": "yarn"          # default: npm; alternatively use yarn, pnpm, or bun
+          "default": "yarn"          # default: package.json engines, then npm
         },
         {
           "function": ["lint"],

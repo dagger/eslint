@@ -7,17 +7,17 @@ type Eslint {
   """
   The base image to use.
   """
-  pub baseImageAddress: String!
+  pub baseImageAddress: String
 
   """
   The package manager to use.
   """
-  pub packageManager: String!
+  pub packageManager: String
 
   new(
     ws: Workspace!,
-    baseImageAddress: String! = "node:25-alpine",
-    packageManager: String! = "npm",
+    baseImageAddress: String = null,
+    packageManager: String = null,
   ) {
     self.source = ws.directory("/")
     self.baseImageAddress = baseImageAddress
@@ -29,9 +29,10 @@ type Eslint {
   Lint the source.
   """
   pub lint: Void @check {
-    nodejs(source, baseImageAddress, packageManager)
-      .base
-      .withExec(["npx", "eslint", "."])
+    let node = nodejs(source, baseImageAddress, packageManager)
+
+    node
+      .exec(["eslint", "."], node.withInstallAll(node.base))
       .sync
 
     null
@@ -41,9 +42,9 @@ type Eslint {
   Fix linting issues.
   """
   pub fix: Changeset {
-    let fixed = nodejs(source, baseImageAddress, packageManager)
-      .base
-      .withExec(["npx", "eslint", ".", "--fix"])
+    let node = nodejs(source, baseImageAddress, packageManager)
+    let fixed = node
+      .exec(["eslint", ".", "--fix"], node.withInstallAll(node.base))
       .directory(".")
       .withoutDirectory("node_modules")
 
