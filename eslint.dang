@@ -35,8 +35,7 @@ type Eslint {
   Lint the source.
   """
   pub lint: Void @check {
-    nodejs(source, baseImageAddress, packageManager)
-      .base
+    runtime
       .withWorkdir("/src/" + path)
       .withExec(["npx", "eslint", "."])
       .sync
@@ -48,8 +47,7 @@ type Eslint {
   Fix linting issues.
   """
   pub fix: Changeset {
-    let fixed = nodejs(source, baseImageAddress, packageManager)
-      .base
+    let fixed = runtime
       .withWorkdir("/src/" + path)
       .withExec(["npx", "eslint", ".", "--fix"])
       .directory("/src")
@@ -57,5 +55,23 @@ type Eslint {
 
     fixed
       .changes(source.withoutDirectory("node_modules"))
+  }
+
+  """
+  Runtime container for ESLint. When the workspace root holds no package.json
+  the dependency install is skipped and npx fetches ESLint on demand, so a
+  standalone eslint config works without a Node project.
+  """
+  let runtime: Container! {
+    if (source.glob("package.json").length == 0) {
+      container.from(baseImageAddress)
+        .withMountedCache("/root/.packages", cacheVolume("node-toolchain-packages"))
+        .withEnvVariable("npm_config_cache", "/root/.packages")
+        .withDirectory("/src", source)
+        .withWorkdir("/src")
+        .withEnvVariable("CI", "true")
+    } else {
+      nodejs(source, baseImageAddress, packageManager).base
+    }
   }
 }

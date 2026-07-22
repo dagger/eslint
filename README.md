@@ -42,6 +42,10 @@ from the directory you invoke `dagger` from. Run from the workspace root to
 cover everything, or from a subdirectory to scope `lint` and `fix` to that
 subtree.
 
+If the workspace root holds no `package.json`, the dependency install is
+skipped and `npx` fetches ESLint on demand — a standalone eslint config
+works without a Node project.
+
 ## Customization
 
 The toolchain can be customized in your `dagger.json` to meet your needs:
