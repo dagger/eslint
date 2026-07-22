@@ -5,6 +5,11 @@ type Eslint {
   pub source: Directory!
 
   """
+  Path of the client's working directory, relative to the workspace root.
+  """
+  pub path: String!
+
+  """
   The base image to use.
   """
   pub baseImageAddress: String!
@@ -20,6 +25,7 @@ type Eslint {
     packageManager: String! = "npm",
   ) {
     self.source = ws.directory("/")
+    self.path = ws.path
     self.baseImageAddress = baseImageAddress
     self.packageManager = packageManager
     self
@@ -31,6 +37,7 @@ type Eslint {
   pub lint: Void @check {
     nodejs(source, baseImageAddress, packageManager)
       .base
+      .withWorkdir("/src/" + path)
       .withExec(["npx", "eslint", "."])
       .sync
 
@@ -43,8 +50,9 @@ type Eslint {
   pub fix: Changeset {
     let fixed = nodejs(source, baseImageAddress, packageManager)
       .base
+      .withWorkdir("/src/" + path)
       .withExec(["npx", "eslint", ".", "--fix"])
-      .directory(".")
+      .directory("/src")
       .withoutDirectory("node_modules")
 
     fixed
