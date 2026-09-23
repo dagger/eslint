@@ -25,7 +25,7 @@ type Eslint {
     packageManager: String! = "npm",
   ) {
     self.source = ws.directory("/")
-    self.path = ws.path
+    self.path = ws.cwd
     self.baseImageAddress = baseImageAddress
     self.packageManager = packageManager
     self

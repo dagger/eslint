@@ -14,3 +14,18 @@ name = "dang"
 
 [[modules.dang-sdk.as-sdk.modules]]
 path = "."
+
+[modules.dagger-dang-sdk]
+source = "github.com/dagger/dang-sdk"
+
+[sdks.dang]
+module = "dagger-dang-sdk"
+
+[sdks.dang.scopes."."]
+clients = ["github.com/dagger/node@v0.2.0"]
+is-module = true
+name = "eslint"
+
+[sdks.dang.scopes.".dagger/modules/e2e"]
+clients = ["./."]
+is-module = true
