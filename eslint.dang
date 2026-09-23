@@ -2,22 +2,22 @@ type Eslint {
   """
   The source directory for the project.
   """
-  pub source: Directory!
+  source: Directory!
 
   """
   Path of the client's working directory, relative to the workspace root.
   """
-  pub path: String!
+  path: String!
 
   """
   The base image to use.
   """
-  pub baseImageAddress: String!
+  baseImageAddress: String!
 
   """
   The package manager to use.
   """
-  pub packageManager: String!
+  packageManager: String!
 
   new(
     ws: Workspace!,
@@ -34,7 +34,7 @@ type Eslint {
   """
   Lint the source.
   """
-  pub lint: Void @check {
+  lint: Void @check {
     runtime
       .withWorkdir("/src/" + path)
       .withExec(["npx", "eslint", "."])
@@ -46,7 +46,7 @@ type Eslint {
   """
   Fix linting issues.
   """
-  pub fix: Changeset {
+  fix: Changeset {
     let fixed = runtime
       .withWorkdir("/src/" + path)
       .withExec(["npx", "eslint", ".", "--fix"])
@@ -64,7 +64,8 @@ type Eslint {
   """
   let runtime: Container! {
     if (source.glob("package.json").length == 0) {
-      container.from(baseImageAddress)
+      container
+        .from(baseImageAddress)
         .withMountedCache("/root/.packages", cacheVolume("node-toolchain-packages"))
         .withEnvVariable("npm_config_cache", "/root/.packages")
         .withDirectory("/src", source)
