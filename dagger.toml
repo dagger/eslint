@@ -5,12 +5,12 @@ source = ".dagger/modules/e2e"
 # settings.repo = ""
 
 [modules.dang-sdk]
-source = "github.com/dagger/dang-sdk"
+source = "github.com/dagger/dang-sdk@collections"
 # Marker filename that skips generate when found at or above a Dang SDK module root.
 # settings.skipGenerateFilename = ""
 
 [modules.dagger-dang-sdk]
-source = "github.com/dagger/dang-sdk"
+source = "github.com/dagger/dang-sdk@collections"
 
 [sdks.dang]
 module = "dagger-dang-sdk"
