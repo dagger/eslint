@@ -1,5 +1,10 @@
 """
 End-to-end checks for the eslint toolchain.
+
+The fixtures under `.dagger/modules/e2e/fixtures/` are ESLint projects: one
+clean, one failing, one enclosing a nested project, and a legacy `.eslintrc`
+project that installs its own ESLint. Some fail on purpose, so the checks here
+select them explicitly rather than running the whole collection.
 """
 type E2e {
   """
@@ -7,15 +12,195 @@ type E2e {
   """
   repo: String! = "https://github.com/dagger/hello-dagger"
 
+  let fixtures: String! = ".dagger/modules/e2e/fixtures"
+
+  let assert(condition: Boolean!, message: String!): Void {
+    if (condition == false) { raise message }
+    null
+  }
+
+  """
+  Run a check, raising its failure. A check called through a dependency comes
+  back as a Check that has not run.
+  """
+  let run(check: Check!): Void {
+    # Check.error is not null for a passing check when read from Dang, so ask
+    # pass first and read the message only on failure.
+    if (check.pass == false) {
+      raise check.error.message ?? "check failed"
+    }
+    null
+  }
+
+  """
+  The error a check fails with, or "unexpected success".
+  """
+  let failure(check: Check!): String! {
+    {
+      run(check)
+      "unexpected success"
+    } rescue {
+      err: Error => err.message
+    }
+  }
+
+  let same(got: [String!]!, want: [String!]!): Boolean! {
+    got.join("\n") == want.join("\n")
+  }
+
+  let fixture(name: String!): String! {
+    fixtures + "/" + name
+  }
+
   """
   Run the eslint toolchain against a real-world repository.
 
-  This pulls the hello-dagger repo, exposes it as a Workspace, and runs
-  the eslint `lint` check against it end-to-end.
+  This pulls the hello-dagger repo, exposes it as a Workspace, and lints its
+  ESLint projects end-to-end.
   """
   lintHelloDagger: Void @check {
     let ws = git(repo).head.tree.asWorkspace
+    let projects = eslint.projects(ws)
+    assert(same(projects.keys, ["."]), "hello-dagger is not one root project: " + projects.keys.join(", "))
+    run(projects.batch.lint(ws))
+  }
 
-    eslint(ws).lint
+  """
+  Discovery finds every config root, workspace-root-relative and sorted, from
+  any working directory.
+  """
+  discoveryCheck(ws: Workspace!): Void @check {
+    let root = ws.withWorkdir(".")
+    let all = eslint.projects(root).keys
+    let expected = [
+      fixture("clean"),
+      fixture("failing"),
+      fixture("legacy/src"),
+      fixture("parent"),
+      fixture("parent/nested"),
+    ]
+    assert(same(all, expected), "unexpected projects: " + all.join(", "))
+
+    # A project root sees itself and what is below it, not its enclosing one.
+    let parent = eslint.projects(root.withWorkdir(fixture("parent"))).keys
+    assert(
+      same(parent, [fixture("parent"), fixture("parent/nested")]),
+      "discovery from a project root: " + parent.join(", "),
+    )
+    let nested = eslint.projects(root.withWorkdir(fixture("parent/nested"))).keys
+    assert(same(nested, [fixture("parent/nested")]), "discovery from a nested root: " + nested.join(", "))
+
+    # A directory without a config sees its enclosing project.
+    let inside = eslint.projects(root.withWorkdir(fixture("parent/lib"))).keys
+    assert(same(inside, [fixture("parent")]), "discovery inside a project: " + inside.join(", "))
+
+    # A config below its package.json is still keyed by the config.
+    let legacy = eslint.projects(root.withWorkdir(fixture("legacy"))).keys
+    assert(same(legacy, [fixture("legacy/src")]), "discovery above a project: " + legacy.join(", "))
+    null
+  }
+
+  """
+  get returns items by key, and a subset holds only its keys.
+  """
+  collectionCheck(ws: Workspace!): Void @check {
+    let projects = eslint.projects(ws.withWorkdir("."))
+    assert(projects.get(key: fixture("clean")).path == fixture("clean"), "get returned the wrong project")
+
+    let subset = projects.subset(keys: [fixture("parent"), fixture("clean")])
+    # A subset keeps the collection's order, whatever order it was asked in.
+    assert(same(subset.keys, [fixture("clean"), fixture("parent")]), "subset keys: " + subset.keys.join(", "))
+    assert(subset.get(key: fixture("parent")).path == fixture("parent"), "get missed a subset key")
+    let outside = {
+      subset.get(key: fixture("failing")).path
+    } rescue {
+      err: Error => "rejected: " + err.message
+    }
+    assert(outside.hasPrefix("rejected: "), "get found a key outside the subset")
+    let unknown = {
+      projects.subset(keys: ["nope"]).keys.join(", ")
+    } rescue {
+      err: Error => "rejected: " + err.message
+    }
+    assert(unknown.hasPrefix("rejected: "), "subset accepted an unknown key")
+    assert(projects.subset(keys: []).keys.length == 0, "empty subset was not empty")
+    null
+  }
+
+  """
+  A subset batch lints only its keys: the clean projects pass even though
+  failing ones are in the collection.
+  """
+  batchCheck(ws: Workspace!): Void @check {
+    let projects = eslint.projects(ws.withWorkdir("."))
+    run(
+      projects.subset(keys: [fixture("clean"), fixture("parent"), fixture("legacy/src")]).batch.lint(ws),
+    )
+    null
+  }
+
+  """
+  A failing project fails its own check and every batch it is in, and a batch
+  reports each failing project.
+  """
+  lintFailureCheck(ws: Workspace!): Void @check {
+    let projects = eslint.projects(ws.withWorkdir("."))
+    let own = failure(projects.get(key: fixture("failing")).lint(ws))
+    assert(own.contains("exit code"), "the failing project passed: " + own)
+
+    let batch = failure(
+      projects.subset(keys: [fixture("clean"), fixture("failing")]).batch.lint(ws),
+    )
+    assert(batch.contains(fixture("failing")), "the batch did not name the failing project: " + batch)
+    assert(batch.contains(fixture("clean") + ":") == false, "the batch blamed the clean project: " + batch)
+
+    let both = failure(
+      projects.subset(keys: [fixture("failing"), fixture("parent/nested")]).batch.lint(ws),
+    )
+    assert(
+      both.contains(fixture("failing")) and both.contains(fixture("parent/nested")),
+      "the batch did not report every failure: " + both,
+    )
+    null
+  }
+
+  """
+  A project leaves its nested projects to their own lint: parent passes
+  although the project nested in it fails.
+  """
+  nestedCheck(ws: Workspace!): Void @check {
+    let projects = eslint.projects(ws.withWorkdir("."))
+    run(projects.get(key: fixture("parent")).lint(ws))
+    let nested = failure(projects.get(key: fixture("parent/nested")).lint(ws))
+    assert(nested.contains("exit code"), "the nested project passed: " + nested)
+    null
+  }
+
+  """
+  fix returns ESLint's fixes, rooted at the caller's location, even when
+  problems it cannot fix remain.
+  """
+  fixCheck(ws: Workspace!): Void @check {
+    let root = ws.withWorkdir(".")
+    let failing = eslint.projects(root).get(key: fixture("failing"))
+
+    let fixed = failing.fix(root)
+    assert(
+      same(fixed.modifiedPaths, [fixture("failing/index.js")]),
+      "fix from the root changed: " + fixed.modifiedPaths.join(", "),
+    )
+    assert(
+      fixed.after.file(fixture("failing/index.js")).contents.contains("const fixable"),
+      "fix did not apply prefer-const",
+    )
+
+    let inside = failing.fix(root.withWorkdir(fixture("failing")))
+    assert(
+      same(inside.modifiedPaths, ["index.js"]),
+      "fix from the project changed: " + inside.modifiedPaths.join(", "),
+    )
+
+    assert(eslint.projects(root).get(key: fixture("clean")).fix(root).isEmpty, "fix changed a clean project")
+    null
   }
 }
