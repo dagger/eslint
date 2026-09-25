@@ -58,7 +58,7 @@ type Eslint {
       .findRoots(
         markers: configNames,
         start: absolutePath(start),
-        exclude: ["**/node_modules/**"],
+        exclude: ["**/node_modules"],
       )
       .map { dir => workspaceRootPath(ws, dir) }
   }

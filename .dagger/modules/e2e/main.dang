@@ -90,13 +90,27 @@ type E2e {
     let nested = eslint.projects(root.withWorkdir(fixture("parent/nested"))).keys
     assert(same(nested, [fixture("parent/nested")]), "discovery from a nested root: " + nested.join(", "))
 
-    # A directory without a config sees its enclosing project.
-    let inside = eslint.projects(root.withWorkdir(fixture("parent/lib"))).keys
+    # Inside a project's subdirectory, the enclosing project is the only one
+    # visible, and a bare batch lints exactly it.
+    let lib = root.withWorkdir(fixture("parent/lib"))
+    let inside = eslint.projects(lib).keys
     assert(same(inside, [fixture("parent")]), "discovery inside a project: " + inside.join(", "))
+    run(eslint.projects(lib).batch.lint(lib))
 
-    # A config below its package.json is still keyed by the config.
+    # Outside any project, only the projects below are visible. The legacy
+    # directory holds a package.json but no config.
     let legacy = eslint.projects(root.withWorkdir(fixture("legacy"))).keys
     assert(same(legacy, [fixture("legacy/src")]), "discovery above a project: " + legacy.join(", "))
+
+    # Configs shipped inside node_modules are not projects.
+    let vendored = directory
+      .withNewFile("app/eslint.config.mjs", "export default [];\n")
+      .withNewFile("app/node_modules/dep/eslint.config.js", "export default [];\n")
+      .withNewFile("app/node_modules/dep/.eslintrc.json", "{}\n")
+      .withNewFile("node_modules/other/.eslintrc.js", "module.exports = {};\n")
+      .asWorkspace
+    let apps = eslint.projects(vendored).keys
+    assert(same(apps, ["app"]), "discovery entered node_modules: " + apps.join(", "))
     null
   }
 
