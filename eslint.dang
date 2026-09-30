@@ -8,16 +8,43 @@ type Eslint {
   baseImageAddress: String!
 
   """
-  The package manager to use.
+  The package manager to use: npm, pnpm, yarn or bun. Empty detects it.
   """
   packageManager: String!
 
+  """
+  Extra arguments for the dependency install command.
+  """
+  installFlags: [String!]!
+
+  """
+  Environment variables for ESLint, as KEY=VALUE.
+  """
+  environment: [String!]!
+
   new(
+    """
+    Container image with Node.js.
+    """
     baseImageAddress: String! = "node:25-alpine",
-    packageManager: String! = "npm",
+    """
+    Package manager: npm, pnpm, yarn or bun. Empty detects it from the
+    packageManager field of package.json, then from the lockfile.
+    """
+    packageManager: String! = "",
+    """
+    Extra arguments for the dependency install command, e.g. ["--ignore-scripts"].
+    """
+    installFlags: [String!]! = [],
+    """
+    Environment variables for ESLint, as KEY=VALUE.
+    """
+    environment: [String!]! = [],
   ) {
     self.baseImageAddress = baseImageAddress
     self.packageManager = packageManager
+    self.installFlags = installFlags
+    self.environment = environment
     self
   }
 
@@ -25,14 +52,17 @@ type Eslint {
   ESLint projects at or below the working directory, keyed by config root.
   """
   projects(ws: Workspace!): EslintProjects! {
-    EslintProjects(paths: sorted(configRoots(ws, cwdPath(ws)).uniq), tool: self)
+    let roots = sorted(configRoots(ws, cwdPath(ws)).uniq)
+    EslintProjects(
+      paths: roots.filter { root => ignoredByParent(ws, roots, root) == false },
+      tool: self,
+    )
   }
 
   """
-  File names that mark a directory as an ESLint project: flat config files
-  and legacy .eslintrc files.
+  Flat config file names.
   """
-  let configNames: [String!]! {
+  let flatConfigNames: [String!]! {
     [
       "eslint.config.js",
       "eslint.config.mjs",
@@ -40,6 +70,15 @@ type Eslint {
       "eslint.config.ts",
       "eslint.config.mts",
       "eslint.config.cts",
+    ]
+  }
+
+  """
+  File names that mark a directory as an ESLint project: flat config files
+  and legacy .eslintrc files.
+  """
+  let configNames: [String!]! {
+    flatConfigNames + [
       ".eslintrc",
       ".eslintrc.js",
       ".eslintrc.cjs",
@@ -61,6 +100,102 @@ type Eslint {
         exclude: ["**/node_modules"],
       )
       .map { dir => workspaceRootPath(ws, dir) }
+  }
+
+  """
+  Whether a flat config in another discovered project above root ignores it
+  through its global ignores.
+  """
+  let ignoredByParent(ws: Workspace!, roots: [String!]!, root: String!): Boolean! {
+    roots.any { parent =>
+      parent != root and isBelow(root, parent) and ignores(ws, parent, relativePath(
+        root,
+        parent,
+      ))
+    }
+  }
+
+  """
+  Whether the global ignores of the flat config in dir cover the
+  dir-relative directory rel. Later patterns win, so "!" re-includes.
+  """
+  let ignores(ws: Workspace!, dir: String!, rel: String!): Boolean! {
+    let patterns = globalIgnores(ws, dir)
+    if (patterns.length == 0) {
+      false
+    } else {
+      # Ignoring a directory ignores everything below it, including the
+      # nested config file itself.
+      let empty: [String!]! = []
+      let prefixes = rel.split("/").reduce(empty) { acc, segment =>
+        acc + [if (acc.length == 0) { segment } else { acc.takeLast(1).join("") + "/" + segment }]
+      }
+      let candidates = prefixes + prefixes.map { p => p + "/" } + [rel + "/eslint.config.js"]
+      patterns.reduce(false) { ignored, pattern =>
+        let negated = pattern.hasPrefix("!")
+        let re = globRegex(pattern.trimPrefix("!"))
+        if (candidates.any { c => c.containsMatch(`${re}`) }) { negated == false } else { ignored }
+      }
+    }
+  }
+
+  """
+  The string patterns of the global ignores in the flat config in dir: an
+  object holding only ignores (and a name), or a globalIgnores([...]) call.
+  Patterns built at runtime are not seen.
+  """
+  let globalIgnores(ws: Workspace!, dir: String!): [String!]! {
+    let prefix = if (dir == ".") { "" } else { dir + "/" }
+    let files = ws.glob(prefix + "eslint.config.*").filter { file =>
+      flatConfigNames.any { name => file.trimPrefix("/").trimPrefix("./") == prefix + name }
+    }
+    let empty: [String!]! = []
+    if (files.length == 0) {
+      empty
+    } else {
+      let text = ws.file("/" + files.takeLast(1).join("").trimPrefix("/").trimPrefix("./")).contents
+      let arrays = text.matchAll(
+        `\{\s*(?:name\s*:\s*(?:'[^']*'|"[^"]*")\s*,\s*)?ignores\s*:\s*\[([^\]]*)\]\s*,?\s*\}`,
+      ) + text.matchAll(`globalIgnores\(\s*\[([^\]]*)\]`)
+      arrays.reduce(empty) { acc, array =>
+        acc + array.captures.join("").matchAll(`'([^']*)'|"([^"]*)"`).map { literal =>
+          literal.captures.join("")
+        }
+      }
+    }
+  }
+
+  """
+  A regular expression for an ESLint (minimatch) glob, relative to the
+  config's directory.
+  """
+  let globRegex(glob: String!): String! {
+    let body = glob
+      .trimPrefix("./")
+      .trimPrefix("/")
+      .rewriteMatches(`\*\*/|/\*\*$|\*\*|\*|\?|\{|\}|,|[.+^$()|\[\]\\]`) { match =>
+        let s = match.string
+        if (s == "**/") {
+          "(?:.*/)?"
+        } else if (s == "/**") {
+          "(?:/.*)?"
+        } else if (s == "**") {
+          ".*"
+        } else if (s == "*") {
+          "[^/]*"
+        } else if (s == "?") {
+          "[^/]"
+        } else if (s == "{") {
+          "(?:"
+        } else if (s == "}") {
+          ")"
+        } else if (s == ",") {
+          "|"
+        } else {
+          "\\" + s
+        }
+      }
+    "^" + body + "$"
   }
 
   let project(path: String!): EslintProject! {
@@ -91,6 +226,44 @@ type Eslint {
   """
   let absolutePath(path: String!): String! {
     if (path == ".") { "/" } else { "/" + path }
+  }
+
+  """
+  Whether path is dir or below it.
+  """
+  let isBelow(path: String!, dir: String!): Boolean! {
+    dir == "." or path == dir or path.hasPrefix(dir + "/")
+  }
+
+  """
+  path relative to dir, which holds it.
+  """
+  let relativePath(path: String!, dir: String!): String! {
+    if (path == dir) { "." } else if (dir == ".") { path } else {
+      path.trimPrefix(dir + "/")
+    }
+  }
+
+  """
+  The workspace-root-relative directory of a workspace-absolute file path.
+  """
+  let dirOf(file: String!): String! {
+    let dir = file.trimPrefix("/").split("/").dropLast(1).join("/")
+    if (dir == "") { "." } else { dir }
+  }
+
+  let depth(dir: String!): Int! {
+    if (dir == ".") { 0 } else { dir.split("/").length }
+  }
+
+  """
+  The deepest of the given directories.
+  """
+  let deepest(dirs: [String!]!): String {
+    let none: String = null
+    dirs.reduce(none) { best, dir =>
+      if (best == null) { dir } else if (depth(dir) > depth(best ?? ".")) { dir } else { best }
+    }
   }
 
   let sorted(items: [String!]!): [String!]! {
@@ -131,7 +304,8 @@ type EslintProjects @collection {
     let failures = paths.map { p => project(p) }.{{path, failure: lintFailure(ws)}}
       .filter { result => result.failure != null }
     if (failures.length > 0) {
-      raise "ESLint failed:\n" + failures.map { result =>
+      raise "ESLint failed in " + toString(failures.length) + " of " + toString(paths.length)
+        + " projects:\n" + failures.map { result =>
         "- " + result.path + ": " + (result.failure ?? "")
       }.join("\n")
     }
@@ -154,7 +328,10 @@ type EslintProject {
   Lint this project.
   """
   lint(ws: Workspace!): Void @check {
-    lintExec(ws).sync
+    let failure = lintFailure(ws)
+    if (failure != null) {
+      raise path + ": " + (failure ?? "")
+    }
     null
   }
 
@@ -163,22 +340,23 @@ type EslintProject {
   lint to report.
   """
   fix(ws: Workspace!): Changeset! {
+    let failure = installFailure(ws)
+    if (failure != null) {
+      raise path + ": " + (failure ?? "")
+    }
     let ready = runtime(ws)
     let fixed = ready.withExec(eslint(ws) + ["--fix"], expect: ReturnType.ANY)
     # ESLint exits 1 when problems it cannot fix remain, and 2 when it could
     # not run at all.
     if (fixed.exitCode > 1) {
-      raise "ESLint failed in " + path + ":\n" + fixed.stderr
+      raise path + ": " + (stepFailure("eslint --fix failed", "", fixed, 30) ?? "")
     }
     # The CLI applies a changeset from the caller's location, so root it
     # there. A project enclosing the caller contributes only the part below
     # it, which is all a changeset rooted there can hold.
     let cwd = tool.cwdPath(ws)
-    let below = cwd == "." or path == cwd or path.hasPrefix(cwd + "/")
-    let scope = if (below) { path } else { cwd }
-    let at = if (scope == cwd) { "." } else if (cwd == ".") { scope } else {
-      scope.trimPrefix(cwd + "/")
-    }
+    let scope = if (tool.isBelow(path, cwd)) { path } else { cwd }
+    let at = tool.relativePath(scope, cwd)
     # Diff against the same container before the fix so dependency installs
     # (lockfiles, node_modules) never reach the changeset.
     let after = directory.withDirectory(at, fixed.directory("/src/" + scope), exclude: ["**/node_modules"])
@@ -187,16 +365,69 @@ type EslintProject {
   }
 
   """
-  Error message from linting this project, or null when it passes.
+  Why linting this project failed, naming the failing step, or null when it
+  passes.
   """
   let lintFailure(ws: Workspace!): String {
-    { lintExec(ws).sync; null } rescue {
-      err: Error => err.message
+    let install = installFailure(ws)
+    if (install != null) {
+      install
+    } else {
+      stepFailure(
+        "eslint failed",
+        "",
+        runtime(ws).withExec(eslint(ws), expect: ReturnType.ANY),
+        30,
+      )
     }
   }
 
-  let lintExec(ws: Workspace!): Container! {
-    runtime(ws).withExec(eslint(ws))
+  """
+  Why installing this project's dependencies failed, or null.
+  """
+  let installFailure(ws: Workspace!): String {
+    let root = installRoot(ws)
+    if (root == null) {
+      null
+    } else {
+      let dir = root ?? "."
+      let pm = packageManagerFor(ws, dir)
+      let setup = {
+        withPackageManager(pm).sync
+        null
+      } rescue {
+        err: Error => "could not set up " + pm + ": " + err.message
+      }
+      if (setup != null) {
+        setup
+      } else {
+        stepFailure(
+          "install failed",
+          installCommand(ws, dir).join(" "),
+          installed(ws, dir),
+          15,
+        )
+      }
+    }
+  }
+
+  """
+  A failure message for an exec that ran with any exit code, or null when it
+  succeeded: the step, its exit code and the last lines of its output.
+  """
+  let stepFailure(step: String!, command: String!, ran: Container!, lines: Int!): String {
+    let code = ran.exitCode
+    if (code == 0) {
+      null
+    } else if (code == 127 and command == "") {
+      # The ESLint runner explains itself when the project lacks ESLint.
+      ran.stderr.trimSpace
+    } else {
+      let output = (ran.stderr + "\n" + ran.stdout).trimSpace.split("\n").takeLast(lines).join("\n")
+      let detail = if (command == "") { "" } else { command + ", " }
+      let tail = if (output == "") { "" } else { ":\n" + output }
+      step + " (" + detail + "exit " + toString(code) + ")" + tail
+    }
   }
 
   """
@@ -207,57 +438,270 @@ type EslintProject {
     let nested = tool
       .configRoots(ws, path)
       .filter { dir => dir != path }
-      .map { dir => if (path == ".") { dir } else { dir.trimPrefix(path + "/") } }
+      .map { dir => tool.relativePath(dir, path) }
     let empty: [String!]! = []
     let ignores = nested.reduce(empty) { args, dir => args + ["--ignore-pattern", dir + "/**"] }
     # A project whose files all belong to nested projects has nothing left to
     # lint, which ESLint otherwise reports as an error.
     let unmatched = if (nested.length > 0) { ["--no-error-on-unmatched-pattern"] } else { empty }
-    ["npx", "eslint", "."] + ignores + unmatched
+    ["dagger-eslint", "."] + ignores + unmatched
   }
 
   """
-  Directory holding the nearest package.json at or above this project, or
-  null when there is none.
+  Runs the project's own ESLint: the nearest node_modules/.bin/eslint up to
+  the install root, failing when there is none. --concurrency auto is added
+  for ESLint 9.34 and later with a flat config. Without an install root, npx
+  fetches ESLint.
   """
-  let packageRoot(ws: Workspace!): String {
-    let found = ws.findUp(name: "package.json", from: tool.absolutePath(path))
-    if (found == null) {
+  let runner: String! {
+    ```
+    #!/bin/sh
+    if [ -z "$ESLINT_INSTALL_ROOT" ]; then
+      echo "+ npx --yes eslint $*" >&2
+      exec npx --yes eslint "$@"
+    fi
+    bin=
+    d=$PWD
+    while :; do
+      if [ -x "$d/node_modules/.bin/eslint" ]; then bin="$d/node_modules/.bin/eslint"; break; fi
+      if [ "$d" = "$ESLINT_INSTALL_ROOT" ] || [ "$d" = / ]; then break; fi
+      d=$(dirname "$d")
+    done
+    if [ -z "$bin" ] && [ -f "$ESLINT_INSTALL_ROOT/.pnp.cjs" ]; then
+      echo "+ yarn eslint $*" >&2
+      exec yarn eslint "$@"
+    fi
+    if [ -z "$bin" ]; then
+      echo "eslint is not installed: add it to the devDependencies of \${ESLINT_INSTALL_ROOT#/src/}/package.json (or of a package.json between it and the project)" >&2
+      exit 127
+    fi
+    if [ "$ESLINT_FLAT_CONFIG" = 1 ]; then
+      version=$(node -p 'require(require.resolve("eslint/package.json", { paths: [process.cwd()] })).version' 2>/dev/null)
+      major=\${version%%.*}
+      minor=\${version#*.}
+      minor=\${minor%%.*}
+      if [ "\${major:-0}" -gt 9 ] 2>/dev/null || { [ "\${major:-0}" -eq 9 ] && [ "\${minor:-0}" -ge 34 ]; } 2>/dev/null; then
+        set -- "$@" --concurrency auto
+      fi
+    fi
+    echo "+ \${bin#/src/} $*" >&2
+    exec "$bin" "$@"
+    ```
+  }
+
+  """
+  Where dependencies are installed: the nearest workspace root at or above
+  this project (pnpm-workspace.yaml, or a package.json with "workspaces"),
+  else the nearest directory with a lockfile, else the nearest package.json.
+  Null when there is no package.json at or above the project.
+  """
+  let installRoot(ws: Workspace!): String {
+    let from = tool.absolutePath(path)
+    let pkg = ws.findUp(name: "package.json", from: from)
+    if (pkg == null) {
       null
     } else {
-      let dir = (found ?? "").trimPrefix("/").split("/").dropLast(1).join("/")
-      if (dir == "") { "." } else { dir }
+      let pkgDir = tool.dirOf(pkg ?? "")
+      let empty: [String!]! = []
+      let pnpmWorkspace = ws.findUp(name: "pnpm-workspace.yaml", from: from)
+      let pnpmRoots = if (pnpmWorkspace == null) { empty } else { [tool.dirOf(pnpmWorkspace ?? "")] }
+      let workspaceRoots = workspacesPackage(ws, pkgDir) + pnpmRoots
+      let lockDirs = lockfiles.reduce(empty) { dirs, name =>
+        let found = ws.findUp(name: name, from: from)
+        if (found == null) { dirs } else { dirs + [tool.dirOf(found ?? "")] }
+      }
+      tool.deepest(workspaceRoots) ?? tool.deepest(lockDirs) ?? pkgDir
     }
   }
 
   """
-  Container with the workspace mounted at /src, working in this project.
-  Dependencies are installed from the nearest package.json at or above the
-  project; without one, npx fetches ESLint on demand, so a standalone ESLint
-  config works without a Node project.
+  The nearest directory at or above dir whose package.json declares
+  "workspaces", as a one-element list, or empty.
   """
-  let runtime(ws: Workspace!): Container! {
-    let base = container
-      .from(tool.baseImageAddress)
-      .withMountedCache("/root/.packages", cacheVolume("node-toolchain-packages"))
-      .withEnvVariable("npm_config_cache", "/root/.packages")
-      .withEnvVariable("YARN_CACHE_FOLDER", "/root/.packages")
-      .withEnvVariable("PNPM_HOME", "/root/.packages")
-      .withEnvVariable("BUN_INSTALL_CACHE_DIR", "/root/.packages")
-      .withEnvVariable("CI", "true")
-      .withDirectory("/src", ws.directory("/", exclude: ["**/node_modules"]))
-    let pkg = packageRoot(ws)
-    let installed = if (pkg == null) {
-      base
+  let workspacesPackage(ws: Workspace!, dir: String!): [String!]! {
+    let prefix = if (dir == ".") { "" } else { dir + "/" }
+    let declares = ws.file("/" + prefix + "package.json").contents.containsMatch(`"workspaces"\s*:`)
+    let empty: [String!]! = []
+    if (declares) {
+      [dir]
+    } else if (dir == ".") {
+      empty
     } else {
-      let withPm = if (tool.packageManager == "pnpm" and tool.baseImageAddress.contains("node:")) {
-        base.withExec(["corepack", "enable"])
+      let parent = ws.findUp(name: "package.json", from: tool.absolutePath(
+        tool.dirOf("/" + dir),
+      ))
+      if (parent == null) { empty } else {
+        workspacesPackage(
+          ws,
+          tool.dirOf(parent ?? ""),
+        )
+      }
+    }
+  }
+
+  let lockfiles: [String!]! {
+    ["pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb", "package-lock.json", "npm-shrinkwrap.json"]
+  }
+
+  """
+  The package manager for the install root: the setting, else the
+  packageManager field of its package.json, else its lockfile, else npm.
+  """
+  let packageManagerFor(ws: Workspace!, root: String!): String! {
+    let prefix = if (root == ".") { "" } else { root + "/" }
+    let declared = ws
+      .file("/" + prefix + "package.json")
+      .contents
+      .matchAll(`"packageManager"\s*:\s*"(npm|pnpm|yarn|bun)@`)
+      .map { m => m.captures.join("") }
+    if (tool.packageManager != "") {
+      tool.packageManager
+    } else if (declared.length > 0) {
+      declared.takeLast(1).join("")
+    } else if (hasFile(ws, prefix + "pnpm-lock.yaml")) {
+      "pnpm"
+    } else if (hasFile(ws, prefix + "yarn.lock")) {
+      "yarn"
+    } else if (hasFile(ws, prefix + "bun.lock") or hasFile(ws, prefix + "bun.lockb")) {
+      "bun"
+    } else {
+      "npm"
+    }
+  }
+
+  let hasFile(ws: Workspace!, file: String!): Boolean! {
+    ws.glob(file).length > 0
+  }
+
+  let installCommand(ws: Workspace!, root: String!): [String!]! {
+    [packageManagerFor(ws, root), "install"] + tool.installFlags
+  }
+
+  """
+  Node container with every package manager's cache on a volume, and browser
+  downloads and git hooks switched off: ESLint needs none of them.
+  """
+  let base: Container! {
+    container
+      .from(tool.baseImageAddress)
+      .withMountedCache("/root/.npm", cacheVolume("npm-cache"))
+      .withEnvVariable("npm_config_cache", "/root/.npm")
+      .withMountedCache("/root/.yarn-cache", cacheVolume("yarn-cache"))
+      .withEnvVariable("YARN_CACHE_FOLDER", "/root/.yarn-cache")
+      .withMountedCache("/root/.bun-cache", cacheVolume("bun-cache"))
+      .withEnvVariable("BUN_INSTALL_CACHE_DIR", "/root/.bun-cache")
+      .withMountedCache("/root/.corepack", cacheVolume("corepack"))
+      .withEnvVariable("COREPACK_HOME", "/root/.corepack")
+      .withEnvVariable("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0")
+      .withEnvVariable("CI", "true")
+      .withEnvVariable("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "1")
+      .withEnvVariable("PUPPETEER_SKIP_DOWNLOAD", "1")
+      .withEnvVariable("CYPRESS_INSTALL_BINARY", "0")
+      .withEnvVariable("HUSKY", "0")
+      .withEnvVariable("SKIP_INSTALL_SIMPLE_GIT_HOOKS", "1")
+  }
+
+  """
+  base with the package manager available. pnpm and yarn come from
+  corepack, so the packageManager version in package.json is honoured.
+  """
+  let withPackageManager(pm: String!): Container! {
+    if (pm == "pnpm" or pm == "yarn") {
+      # Images from node 25 on no longer ship corepack, and --force replaces
+      # the yarn they still ship.
+      let ctr = if (pm == "pnpm") {
+        base
+          .withMountedCache("/root/.pnpm-store", cacheVolume("pnpm-store"))
+          .withEnvVariable("npm_config_store_dir", "/root/.pnpm-store")
       } else {
         base
       }
-      nodejs(directory, tool.baseImageAddress, tool.packageManager)
-        .withInstallAll(withPm.withWorkdir("/src/" + (pkg ?? ".")))
+      ctr.withExec([
+        "sh",
+        "-c",
+        "command -v corepack >/dev/null 2>&1 || npm install -g --force corepack; corepack enable",
+      ])
+    } else if (pm == "bun") {
+      base.withExec(["sh", "-c", "command -v bun >/dev/null 2>&1 || npm install -g bun"])
+    } else {
+      base
     }
-    installed.withWorkdir("/src/" + path)
+  }
+
+  """
+  Files the install reads, under the install root. Only these are mounted
+  for the install, so editing source does not re-run it.
+  """
+  let installInputs(ws: Workspace!, root: String!): Directory! {
+    ws.directory(
+      tool.absolutePath(root),
+      include: [
+        "**/package.json",
+        "package-lock.json",
+        "npm-shrinkwrap.json",
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
+        ".pnpmfile.cjs",
+        "yarn.lock",
+        "bun.lock",
+        "bun.lockb",
+        "bunfig.toml",
+        "**/.npmrc",
+        ".yarnrc",
+        ".yarnrc.yml",
+        ".yarn/releases/**",
+        ".yarn/plugins/**",
+        ".yarn/patches/**",
+        "patches/**",
+      ],
+      exclude: ["**/node_modules"],
+    )
+  }
+
+  """
+  The dependency install, run with any exit code so its failure can be
+  reported as such.
+  """
+  let installed(ws: Workspace!, root: String!): Container! {
+    let dir = "/src/" + root
+    withPackageManager(packageManagerFor(ws, root))
+      .withDirectory(dir, installInputs(ws, root))
+      .withWorkdir(dir)
+      .withExec(installCommand(ws, root), expect: ReturnType.ANY)
+  }
+
+  """
+  Container ready to run ESLint in this project. With an install root, its
+  dependencies are installed and its tree is mounted at /src/<root>; without
+  one, the whole workspace is mounted and npx fetches ESLint.
+  """
+  let runtime(ws: Workspace!): Container! {
+    let root = installRoot(ws)
+    let prefix = if (path == ".") { "" } else { path + "/" }
+    let flat = ws.glob(prefix + "eslint.config.*").length > 0
+    let source = if (root == null) {
+      base.withDirectory(
+        "/src",
+        ws.directory("/", exclude: ["**/node_modules"], gitignore: true),
+      )
+    } else {
+      let dir = root ?? "."
+      installed(ws, dir)
+        .withDirectory(
+          "/src/" + dir,
+          ws.directory(tool.absolutePath(dir), exclude: ["**/node_modules"], gitignore: true),
+        )
+        .withEnvVariable("ESLINT_INSTALL_ROOT", "/src/" + dir)
+    }
+    let configured = tool.environment.reduce(source) { acc, pair =>
+      let key = pair.replaceMatches(`(?s)=.*$`, with: "")
+      acc.withEnvVariable(key, pair.trimPrefix(key + "="))
+    }
+    # Plain output, so reports read cleanly in error messages.
+    configured
+      .withEnvVariable("NO_COLOR", "1")
+      .withNewFile("/usr/local/bin/dagger-eslint", runner, permissions: 493)
+      .withEnvVariable("ESLINT_FLAT_CONFIG", if (flat) { "1" } else { "0" })
+      .withWorkdir("/src/" + path)
   }
 }

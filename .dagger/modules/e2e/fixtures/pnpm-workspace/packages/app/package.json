@@ -1,0 +1,9 @@
+{
+  "name": "@eslint-e2e/app",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@eslint-e2e/shared": "workspace:*"
+  }
+}
