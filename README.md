@@ -80,14 +80,18 @@ Each project runs the ESLint its own dependencies install:
    names.
 3. **Cached:** only the files the install reads (every `package.json`,
    lockfiles, `pnpm-workspace.yaml`, `.npmrc`, `.yarnrc*`, `.yarn/` releases,
-   plugins and patches, `patches/`) are mounted for the install, so editing
-   source does not re-run it. The package manager caches, the pnpm store and
+   plugins and patches, `patches/`, and the directories that `file:`,
+   `link:` and `portal:` dependencies point to) are mounted for the install,
+   so editing source does not re-run it. When a `package.json` marks a
+   dependency `injected`, or a local dependency lies outside the install root,
+   the install gets the full source instead. The package manager caches, the pnpm store and
    corepack's downloads are cache volumes. Browser downloads (Playwright,
    Puppeteer, Cypress) and git hook installs are skipped.
 4. **Which ESLint:** the nearest `node_modules/.bin/eslint` from the project
    up to the install root, or `yarn eslint` under Yarn Plug'n'Play. If the
-   project doesn't install ESLint, the check fails and says so. ESLint 9.34
-   and later with a flat config gets `--concurrency auto`.
+   project doesn't install ESLint, the check fails and says so. ESLint runs
+   with its default (single-threaded) concurrency; projects are linted in
+   parallel with each other.
 
 A project with no `package.json` at or above it installs nothing, and `npx`
 fetches the latest ESLint, so a standalone ESLint config works without a Node
