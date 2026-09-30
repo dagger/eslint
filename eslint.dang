@@ -574,7 +574,11 @@ type EslintProject {
   }
 
   let installCommand(ws: Workspace!, root: String!): [String!]! {
-    [packageManagerFor(ws, root), "install"] + tool.installFlags
+    let pm = packageManagerFor(ws, root)
+    # pnpm 12 ignores npm_config_store_dir, so name the cached store on the
+    # command line.
+    let store = if (pm == "pnpm") { ["--store-dir", "/root/.pnpm-store"] } else { [] }
+    [pm, "install"] + store + tool.installFlags
   }
 
   """
@@ -612,7 +616,6 @@ type EslintProject {
       let ctr = if (pm == "pnpm") {
         base
           .withMountedCache("/root/.pnpm-store", cacheVolume("pnpm-store"))
-          .withEnvVariable("npm_config_store_dir", "/root/.pnpm-store")
       } else {
         base
       }
