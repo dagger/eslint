@@ -618,7 +618,8 @@ type EslintProject {
       .from(tool.baseImageAddress)
       .withMountedCache("/root/.npm", cacheVolume("npm-cache"))
       .withEnvVariable("npm_config_cache", "/root/.npm")
-      .withMountedCache("/root/.yarn-cache", cacheVolume("yarn-cache"))
+      # Concurrent yarn 1 installs corrupt a shared cache.
+      .withMountedCache("/root/.yarn-cache", cacheVolume("yarn-cache"), sharing: CacheSharingMode.LOCKED)
       .withEnvVariable("YARN_CACHE_FOLDER", "/root/.yarn-cache")
       .withMountedCache("/root/.bun-cache", cacheVolume("bun-cache"))
       .withEnvVariable("BUN_INSTALL_CACHE_DIR", "/root/.bun-cache")
