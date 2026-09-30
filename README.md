@@ -119,6 +119,9 @@ dagger check -l --all --eslint -f=cli         # ...as flags you can paste back
 The selected projects are linted in parallel, and every failing project is
 reported.
 
+Run the check with `dagger check`, in CI especially: `dagger call` on a check
+function does not fail the command when the check fails.
+
 The flags for this module (see `dagger check --help`):
 
 | Flag                      | Selects                                |
@@ -189,5 +192,6 @@ settings.environment = ["NODE_OPTIONS=--max-old-space-size=4096"]  # default: []
 Or from the CLI:
 
 ```sh
-dagger settings eslint baseImageAddress node:22
+dagger settings eslint baseImageAddress node:22   # set
+dagger settings -u eslint baseImageAddress        # unset, back to the default
 ```
