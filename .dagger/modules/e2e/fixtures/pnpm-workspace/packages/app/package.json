@@ -5,5 +5,8 @@
   "type": "module",
   "dependencies": {
     "@eslint-e2e/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@eslint-e2e/local-config": "file:./local-config"
   }
 }

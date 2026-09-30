@@ -222,6 +222,13 @@ type Eslint {
   }
 
   """
+  Where a workspace-root-relative path is mounted in the ESLint container.
+  """
+  let containerPath(path: String!): String! {
+    if (path == ".") { "/src" } else { "/src/" + path }
+  }
+
+  """
   The workspace-absolute spelling of a workspace-root-relative path.
   """
   let absolutePath(path: String!): String! {
@@ -242,6 +249,26 @@ type Eslint {
     if (path == dir) { "." } else if (dir == ".") { path } else {
       path.trimPrefix(dir + "/")
     }
+  }
+
+  """
+  rel resolved against dir, collapsing "." and "..". A result starting with
+  ".." leaves dir's root.
+  """
+  let joinPath(dir: String!, rel: String!): String! {
+    let prefix = if (dir == ".") { "" } else { dir + "/" }
+    let segments = (prefix + rel).split("/")
+    let empty: [String!]! = []
+    let resolved = segments.reduce(empty) { acc, segment =>
+      if (segment == "" or segment == ".") {
+        acc
+      } else if (segment == ".." and acc.length > 0 and acc.takeLast(1).join("") != "..") {
+        acc.dropLast(1)
+      } else {
+        acc + [segment]
+      }
+    }
+    if (resolved.length == 0) { "." } else { resolved.join("/") }
   }
 
   """
@@ -359,8 +386,16 @@ type EslintProject {
     let at = tool.relativePath(scope, cwd)
     # Diff against the same container before the fix so dependency installs
     # (lockfiles, node_modules) never reach the changeset.
-    let after = directory.withDirectory(at, fixed.directory("/src/" + scope), exclude: ["**/node_modules"])
-    let before = directory.withDirectory(at, ready.directory("/src/" + scope), exclude: ["**/node_modules"])
+    let after = directory.withDirectory(
+      at,
+      fixed.directory(tool.containerPath(scope)),
+      exclude: ["**/node_modules"],
+    )
+    let before = directory.withDirectory(
+      at,
+      ready.directory(tool.containerPath(scope)),
+      exclude: ["**/node_modules"],
+    )
     after.changes(before)
   }
 
@@ -449,9 +484,8 @@ type EslintProject {
 
   """
   Runs the project's own ESLint: the nearest node_modules/.bin/eslint up to
-  the install root, failing when there is none. --concurrency auto is added
-  for ESLint 9.34 and later with a flat config. Without an install root, npx
-  fetches ESLint.
+  the install root, or yarn's under Plug'n'Play, and says how to fix it when
+  there is none. Without an install root, npx fetches ESLint.
   """
   let runner: String! {
     ```
@@ -460,32 +494,26 @@ type EslintProject {
       echo "+ npx --yes eslint $*" >&2
       exec npx --yes eslint "$@"
     fi
-    bin=
     d=$PWD
     while :; do
-      if [ -x "$d/node_modules/.bin/eslint" ]; then bin="$d/node_modules/.bin/eslint"; break; fi
+      if [ -x "$d/node_modules/.bin/eslint" ]; then
+        echo "+ \${d#/src/}/node_modules/.bin/eslint $*" >&2
+        exec "$d/node_modules/.bin/eslint" "$@"
+      fi
       if [ "$d" = "$ESLINT_INSTALL_ROOT" ] || [ "$d" = / ]; then break; fi
       d=$(dirname "$d")
     done
-    if [ -z "$bin" ] && [ -f "$ESLINT_INSTALL_ROOT/.pnp.cjs" ]; then
+    if [ -f "$ESLINT_INSTALL_ROOT/.pnp.cjs" ]; then
       echo "+ yarn eslint $*" >&2
       exec yarn eslint "$@"
     fi
-    if [ -z "$bin" ]; then
-      echo "eslint is not installed: add it to the devDependencies of \${ESLINT_INSTALL_ROOT#/src/}/package.json (or of a package.json between it and the project)" >&2
-      exit 127
+    manifest="\${ESLINT_INSTALL_ROOT#/src/}/package.json"
+    if [ "$PWD" = "$ESLINT_INSTALL_ROOT" ]; then
+      echo "eslint is not installed: add it to the devDependencies of $manifest" >&2
+    else
+      echo "eslint is not installed: add it to the devDependencies of $manifest, or of a package.json between it and the project" >&2
     fi
-    if [ "$ESLINT_FLAT_CONFIG" = 1 ]; then
-      version=$(node -p 'require(require.resolve("eslint/package.json", { paths: [process.cwd()] })).version' 2>/dev/null)
-      major=\${version%%.*}
-      minor=\${version#*.}
-      minor=\${minor%%.*}
-      if [ "\${major:-0}" -gt 9 ] 2>/dev/null || { [ "\${major:-0}" -eq 9 ] && [ "\${minor:-0}" -ge 34 ]; } 2>/dev/null; then
-        set -- "$@" --concurrency auto
-      fi
-    fi
-    echo "+ \${bin#/src/} $*" >&2
-    exec "$bin" "$@"
+    exit 127
     ```
   }
 
@@ -636,29 +664,76 @@ type EslintProject {
   for the install, so editing source does not re-run it.
   """
   let installInputs(ws: Workspace!, root: String!): Directory! {
-    ws.directory(
+    let manifests = ws.directory(
       tool.absolutePath(root),
-      include: [
-        "**/package.json",
-        "package-lock.json",
-        "npm-shrinkwrap.json",
-        "pnpm-lock.yaml",
-        "pnpm-workspace.yaml",
-        ".pnpmfile.cjs",
-        "yarn.lock",
-        "bun.lock",
-        "bun.lockb",
-        "bunfig.toml",
-        "**/.npmrc",
-        ".yarnrc",
-        ".yarnrc.yml",
-        ".yarn/releases/**",
-        ".yarn/plugins/**",
-        ".yarn/patches/**",
-        "patches/**",
-      ],
+      include: ["**/package.json"],
       exclude: ["**/node_modules"],
     )
+    let local = localDependencies(manifests)
+    # pnpm copies injected workspace packages too; rather than resolve their
+    # names, install from the full source. So does a local dependency outside
+    # the install root.
+    let injected = manifests
+      .search(pattern: `"injected"\s*:\s*true`, globs: ["**/package.json"], filesOnly: true).{{filePath}}
+      .length > 0
+    let outside = local.any { dir => dir == ".." or dir.hasPrefix("../") or dir.hasPrefix("/") }
+    if (injected or outside) {
+      ws.directory(tool.absolutePath(root), exclude: ["**/node_modules"], gitignore: true)
+    } else {
+      let empty: [String!]! = []
+      ws.directory(
+        tool.absolutePath(root),
+        include: installFiles + local.reduce(empty) { acc, dir => acc + [dir, dir + "/**"] },
+        exclude: ["**/node_modules"],
+      )
+    }
+  }
+
+  """
+  Files every install reads, relative to the install root.
+  """
+  let installFiles: [String!]! {
+    [
+      "**/package.json",
+      "package-lock.json",
+      "npm-shrinkwrap.json",
+      "pnpm-lock.yaml",
+      "pnpm-workspace.yaml",
+      ".pnpmfile.cjs",
+      "yarn.lock",
+      "bun.lock",
+      "bun.lockb",
+      "bunfig.toml",
+      "**/.npmrc",
+      ".yarnrc",
+      ".yarnrc.yml",
+      ".yarn/releases/**",
+      ".yarn/plugins/**",
+      ".yarn/patches/**",
+      "patches/**",
+    ]
+  }
+
+  """
+  Paths, relative to the install root, of the local directories and tarballs
+  that package.json files depend on through file:, link: or portal: specs
+  (dependencies of any kind, overrides and resolutions). Package managers
+  copy them at install time, so the install needs their contents.
+  """
+  let localDependencies(manifests: Directory!): [String!]! {
+    let empty: [String!]! = []
+    let hits = manifests
+      .search(pattern: `"(file|link|portal):[^"]+"`, globs: ["**/package.json"]).{{filePath, matchedLines}}
+    hits
+      .reduce(empty) { acc, hit =>
+        let file = hit.filePath.trimPrefix("./").trimPrefix("/")
+        let dir = tool.dirOf("/" + file)
+        acc + hit.matchedLines.matchAll(`"(?:file|link|portal):([^"]+)"`).map { m =>
+          let spec = m.captures.join("")
+          if (spec.hasPrefix("/")) { spec } else { tool.joinPath(dir, spec) }
+        }
+      }
+      .uniq
   }
 
   """
@@ -666,7 +741,7 @@ type EslintProject {
   reported as such.
   """
   let installed(ws: Workspace!, root: String!): Container! {
-    let dir = "/src/" + root
+    let dir = tool.containerPath(root)
     withPackageManager(packageManagerFor(ws, root))
       .withDirectory(dir, installInputs(ws, root))
       .withWorkdir(dir)
@@ -680,8 +755,6 @@ type EslintProject {
   """
   let runtime(ws: Workspace!): Container! {
     let root = installRoot(ws)
-    let prefix = if (path == ".") { "" } else { path + "/" }
-    let flat = ws.glob(prefix + "eslint.config.*").length > 0
     let source = if (root == null) {
       base.withDirectory(
         "/src",
@@ -691,10 +764,10 @@ type EslintProject {
       let dir = root ?? "."
       installed(ws, dir)
         .withDirectory(
-          "/src/" + dir,
+          tool.containerPath(dir),
           ws.directory(tool.absolutePath(dir), exclude: ["**/node_modules"], gitignore: true),
         )
-        .withEnvVariable("ESLINT_INSTALL_ROOT", "/src/" + dir)
+        .withEnvVariable("ESLINT_INSTALL_ROOT", tool.containerPath(dir))
     }
     let configured = tool.environment.reduce(source) { acc, pair =>
       let key = pair.replaceMatches(`(?s)=.*$`, with: "")
@@ -704,7 +777,6 @@ type EslintProject {
     configured
       .withEnvVariable("NO_COLOR", "1")
       .withNewFile("/usr/local/bin/dagger-eslint", runner, permissions: 493)
-      .withEnvVariable("ESLINT_FLAT_CONFIG", if (flat) { "1" } else { "0" })
-      .withWorkdir("/src/" + path)
+      .withWorkdir(tool.containerPath(path))
   }
 }

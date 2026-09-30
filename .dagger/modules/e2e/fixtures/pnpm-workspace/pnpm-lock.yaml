@@ -175,6 +175,10 @@ importers:
       '@eslint-e2e/shared':
         specifier: workspace:*
         version: link:../shared
+    devDependencies:
+      '@eslint-e2e/local-config':
+        specifier: file:./local-config
+        version: file:packages/app/local-config
 
   packages/shared: {}
 
@@ -189,6 +193,9 @@ packages:
   '@eslint-community/regexpp@4.12.2':
     resolution: {integrity: sha512-EriSTlt5OC9/7SXkRSCAhfSxxoSUgBm33OH+IkwbdpgoqsSsUg7y3uh+IICI/Qg4BBWr3U2i39RpmycbxMq4ew==}
     engines: {node: ^12.0.0 || ^14.0.0 || >=16.0.0}
+
+  '@eslint-e2e/local-config@file:packages/app/local-config':
+    resolution: {directory: packages/app/local-config, type: directory}
 
   '@eslint/config-array@0.21.2':
     resolution: {integrity: sha512-nJl2KGTlrf9GjLimgIru+V/mzgSK0ABCDQRvxw5BjURL7WfH5uoWmizbH7QB6MmnMBd8cIC9uceWnezL1VZWWw==}
@@ -526,6 +533,8 @@ snapshots:
       eslint-visitor-keys: 3.4.3
 
   '@eslint-community/regexpp@4.12.2': {}
+
+  '@eslint-e2e/local-config@file:packages/app/local-config': {}
 
   '@eslint/config-array@0.21.2(supports-color@7.2.0)':
     dependencies:

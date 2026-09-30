@@ -1,9 +1,5 @@
-// Linted by the ESLint the workspace root installs with pnpm.
-export default [
-  {
-    rules: {
-      "no-unused-vars": "error",
-      "prefer-const": "error",
-    },
-  },
-];
+// The rules come from a file: dependency, so this config only loads when the
+// install copied that directory's files, not just its package.json.
+import { rules } from "@eslint-e2e/local-config";
+
+export default [{ rules }];
