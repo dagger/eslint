@@ -52,11 +52,25 @@ type Eslint {
   ESLint projects at or below the working directory, keyed by config root.
   """
   projects(ws: Workspace!): EslintProjects! {
-    let roots = sorted(configRoots(ws, cwdPath(ws)).uniq)
-    EslintProjects(
-      paths: roots.filter { root => ignoredByParent(ws, roots, root) == false },
-      tool: self,
-    )
+    # One scan of the whole workspace serves discovery, the global-ignores
+    # pruning and every project's list of nested projects, so none of them
+    # depends on where dagger runs.
+    let roots = sorted(configRoots(ws, ".").uniq)
+    let projects = roots.filter { root => ignored(ws, roots, root) == false }
+    let cwd = cwdPath(ws)
+    let below = projects.filter { project => isBelow(project, cwd) }
+    # Inside a project's subdirectory (or a directory it ignores), the
+    # enclosing project is selected too.
+    let empty: [String!]! = []
+    let enclosing = if (below.any { project => project == cwd }) {
+      empty
+    } else {
+      let found = deepest(
+        projects.filter { project => project != cwd and isBelow(cwd, project) },
+      )
+      if (found == null) { empty } else { [found ?? "."] }
+    }
+    EslintProjects(paths: sorted(enclosing + below), roots: roots, tool: self)
   }
 
   """
@@ -106,13 +120,21 @@ type Eslint {
   Whether a flat config in another discovered project above root ignores it
   through its global ignores.
   """
-  let ignoredByParent(ws: Workspace!, roots: [String!]!, root: String!): Boolean! {
-    roots.any { parent =>
-      parent != root and isBelow(root, parent) and ignores(ws, parent, relativePath(
-        root,
-        parent,
-      ))
+  let ignored(ws: Workspace!, roots: [String!]!, root: String!): Boolean! {
+    let parent = parentRoot(roots, root)
+    if (parent == null) {
+      false
+    } else {
+      let dir = parent ?? "."
+      ignored(ws, roots, dir) or ignores(ws, dir, relativePath(root, dir))
     }
+  }
+
+  """
+  The nearest config root strictly above root, or null.
+  """
+  let parentRoot(roots: [String!]!, root: String!): String {
+    deepest(roots.filter { dir => dir != root and isBelow(root, dir) })
   }
 
   """
@@ -130,7 +152,7 @@ type Eslint {
       let prefixes = rel.split("/").reduce(empty) { acc, segment =>
         acc + [if (acc.length == 0) { segment } else { acc.takeLast(1).join("") + "/" + segment }]
       }
-      let candidates = prefixes + prefixes.map { p => p + "/" } + [rel + "/eslint.config.js"]
+      let candidates = prefixes + prefixes.map { p => p + "/" }
       patterns.reduce(false) { ignored, pattern =>
         let negated = pattern.hasPrefix("!")
         let re = globRegex(pattern.trimPrefix("!"))
@@ -198,8 +220,8 @@ type Eslint {
     "^" + body + "$"
   }
 
-  let project(path: String!): EslintProject! {
-    EslintProject(path: path, tool: self)
+  let project(path: String!, roots: [String!]!): EslintProject! {
+    EslintProject(path: path, roots: roots, tool: self)
   }
 
   """
@@ -313,13 +335,18 @@ type EslintProjects @collection {
   """
   paths: [String!]! @keys
 
+  """
+  Every ESLint config root in the workspace, projects or not.
+  """
+  let roots: [String!]!
+
   let tool: Eslint!
 
   """
   The ESLint project rooted at path.
   """
   project(path: String!): EslintProject! @get {
-    tool.project(path)
+    tool.project(path, roots)
   }
 
   """
@@ -348,6 +375,11 @@ type EslintProject {
   Project root, relative to the workspace root.
   """
   path: String!
+
+  """
+  Every ESLint config root in the workspace.
+  """
+  let roots: [String!]!
 
   let tool: Eslint!
 
@@ -470,9 +502,8 @@ type EslintProject {
   own, with their own config, so they are ignored here.
   """
   let eslint(ws: Workspace!): [String!]! {
-    let nested = tool
-      .configRoots(ws, path)
-      .filter { dir => dir != path }
+    let nested = roots
+      .filter { dir => dir != path and tool.isBelow(dir, path) }
       .map { dir => tool.relativePath(dir, path) }
     let empty: [String!]! = []
     let ignores = nested.reduce(empty) { args, dir => args + ["--ignore-pattern", dir + "/**"] }

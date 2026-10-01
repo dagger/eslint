@@ -102,6 +102,17 @@ type E2e {
     assert(same(inside, [fixture("parent")]), "discovery inside a project: " + inside.join(", "))
     run(eslint.projects(lib).batch.lint(lib))
 
+    # Inside a directory parent's global ignores cover, which holds a config
+    # of its own, discovery still answers for the whole workspace: that
+    # directory is no project, and the enclosing parent is selected.
+    let template = root.withWorkdir(fixture("parent/ignored-template"))
+    let ignoredHere = eslint.projects(template).keys
+    assert(
+      same(ignoredHere, [fixture("parent")]),
+      "discovery inside an ignored directory: " + ignoredHere.join(", "),
+    )
+    run(eslint.projects(template).batch.lint(template))
+
     # Outside any project, only the projects below are visible. The legacy
     # directory holds a package.json but no config.
     let legacy = eslint.projects(root.withWorkdir(fixture("legacy"))).keys
@@ -235,15 +246,18 @@ type E2e {
   }
 
   """
-  Discovery drops configs that an enclosing flat config's global ignores
-  cover, reading only literal patterns: ignores-only objects (with an
-  optional name) and globalIgnores([...]), with "!" re-including.
+  Discovery drops configs that the nearest enclosing config's global ignores
+  cover, as ESLint 10 does when it walks the tree: an ignored directory is
+  pruned with everything below it, but a config in between starts a fresh
+  scope that the grandparent's ignores do not reach. Only literal patterns
+  are read: ignores-only objects (with an optional name) and
+  globalIgnores([...]), with "!" re-including.
   """
   ignoresCheck: Void @check {
     let config = ```
       import { defineConfig, globalIgnores } from "eslint/config";
       export default defineConfig([
-        globalIgnores(["templates/*", "!templates/kept", "**/dist/**"]),
+        globalIgnores(["templates/*", "!templates/kept", "**/dist/**", "**/snapshots/**"]),
         { name: "generated", ignores: ['gen-*'] },
         { files: ["**/*.js"], ignores: ["scoped/**"] },
       ]);
@@ -252,16 +266,66 @@ type E2e {
     let ws = directory
       .withNewFile("eslint.config.mjs", config)
       .withNewFile("templates/react/eslint.config.js", empty)
+      .withNewFile("templates/react/sub/eslint.config.js", empty)
       .withNewFile("templates/kept/eslint.config.js", empty)
-      .withNewFile("packages/a/dist/eslint.config.js", empty)
       .withNewFile("gen-client/eslint.config.js", empty)
       .withNewFile("scoped/eslint.config.js", empty)
+      .withNewFile("snapshots/eslint.config.js", empty)
+      .withNewFile("pkg/eslint.config.js", empty)
+      .withNewFile("pkg/snapshots/eslint.config.js", empty)
       .withNewFile("packages/a/.eslintrc.json", "{}\n")
+      .withNewFile("packages/a/dist/eslint.config.js", empty)
       .asWorkspace
     let keys = eslint.projects(ws).keys
+    # pkg/snapshots and packages/a/dist sit below a config of their own,
+    # so the root's ignores do not decide for them.
     assert(
-      same(keys, [".", "packages/a", "scoped", "templates/kept"]),
-      "global ignores were not applied: " + keys.join(", "),
+      same(keys, [".", "packages/a", "packages/a/dist", "pkg", "pkg/snapshots", "scoped", "templates/kept"]),
+      "global ignores were not applied as ESLint 10 does: " + keys.join(", "),
+    )
+
+    # The answer does not depend on where dagger runs: inside an ignored
+    # directory, the root project is selected.
+    let inside = eslint.projects(ws.withWorkdir("templates/react/sub")).keys
+    assert(same(inside, ["."]), "discovery inside an ignored directory: " + inside.join(", "))
+    null
+  }
+
+  """
+  No file is linted by nobody and none twice when a grandparent's global
+  ignores cover a directory below a nested config, on ESLint 10 (fetched by
+  npx without a package.json) and ESLint 9 (installed): the nested
+  project's files are linted by their own project only.
+  """
+  nestedIgnoresCheck: Void @check {
+    let base = directory
+      .withNewFile("eslint.config.mjs", "export default [{ ignores: [\"**/snapshots/**\"] }, { rules: { eqeqeq: \"error\" } }];\n")
+      .withNewFile("code.js", "export const root = 1 === 1;\n")
+      .withNewFile("pkg/eslint.config.mjs", "export default [{ rules: { \"no-var\": \"error\" } }];\n")
+      .withNewFile("pkg/code.js", "export const pkg = 1;\n")
+      .withNewFile("pkg/snapshots/eslint.config.mjs", "export default [{ rules: { camelcase: \"error\" } }];\n")
+      .withNewFile("pkg/snapshots/code.js", "var snake_case = 1;\nexport { snake_case };\n")
+    let eslint10 = base.asWorkspace
+    let eslint9 = base
+      .withNewFile("package.json", "{ \"private\": true, \"devDependencies\": { \"eslint\": \"9.39.5\" } }\n")
+      .asWorkspace
+    nestedIgnores(eslint10, "ESLint 10")
+    nestedIgnores(eslint9, "ESLint 9")
+    null
+  }
+
+  let nestedIgnores(ws: Workspace!, version: String!): Void {
+    let projects = eslint.projects(ws)
+    assert(
+      same(projects.keys, [".", "pkg", "pkg/snapshots"]),
+      version + " projects: " + projects.keys.join(", "),
+    )
+    run(projects.get(key: ".").lint(ws))
+    run(projects.get(key: "pkg").lint(ws))
+    let snapshots = failure(projects.get(key: "pkg/snapshots").lint(ws))
+    assert(
+      snapshots.contains("camelcase") and snapshots.contains("no-var") == false,
+      version + ": pkg/snapshots was not linted, or not with its own config: " + snapshots,
     )
     null
   }
