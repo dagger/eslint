@@ -30,15 +30,22 @@ List the projects visible from where you stand:
 dagger list eslint-projects -a
 ```
 
-Discovery only reads file names and config text; it never runs ESLint or
-Node, so listing stays fast. That has limits:
+Discovery scans the whole workspace once, reading only file names and
+config text; it never runs ESLint or Node, so listing stays fast, and what is
+a project does not depend on where you run `dagger`. That has limits:
 
 - `node_modules` directories are never searched.
-- A config inside a directory that an enclosing flat config ignores globally
-  is not a project. Only literal string patterns are read: an object holding
-  just `ignores` (and optionally `name`), or `globalIgnores([...])`. Patterns
-  built at runtime, or ignores in an object that also has `files`, are not
-  seen.
+- A config inside a directory that the **nearest** enclosing config ignores
+  globally is not a project, and neither is anything below it. A config in
+  between starts a fresh scope: a grandparent's ignores do not reach past
+  it. This is how ESLint 10 walks a tree. ESLint 9 and 8 (flat config) apply
+  only the config found from where they run, so the module's split into
+  projects gives the same answer as running ESLint inside each project
+  directory. Either way no file is linted by nobody, and none twice.
+- Only literal string patterns are read: an object holding just `ignores`
+  (and optionally `name`), or `globalIgnores([...])`. Patterns built at
+  runtime, ignores in an object that also has `files`, and legacy
+  `.eslintrc` `ignorePatterns` are not seen.
 - A config given only in `package.json` (`eslintConfig`), through `--config`,
   or under another file name is not found.
 - A directory without its own config is linted as part of the project that
@@ -54,7 +61,8 @@ Which projects you see depends on where you run `dagger`:
 
 - **At a project root:** that project and the projects below it.
 - **Inside a project's subdirectory:** the enclosing project, plus any
-  projects below where you stand.
+  projects below where you stand. A directory the project ignores counts as
+  its subdirectory, even if it holds a config of its own.
 - **Outside any project:** the projects below you.
 
 So you don't need a flag to lint the project you are working in:
