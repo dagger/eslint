@@ -1,75 +1,209 @@
 # eslint
 
-A [Dagger](https://dagger.io) toolchain — written in the `.dang` module
-language — that lints your project with [ESLint](https://eslint.org), using
-your project's own ESLint configuration and version.
+A [Dagger](https://dagger.io) module, written in Dang, that lints your
+JavaScript and TypeScript projects with [ESLint](https://eslint.org), using
+each project's own ESLint configuration and version.
 
-## Functions
+## Requirements
 
-| Function | Description                                                    |
-| -------- | -------------------------------------------------------------- |
-| `lint`   | Lint the source (a `@check`).                                  |
-| `fix`    | Fix linting issues; returns the changes as a `Changeset`.      |
+Requires Dagger v1.0.0-beta.15 or later.
 
-## Usage
-
-Install the module in your workspace:
+## Install
 
 ```sh
 dagger install github.com/dagger/eslint
 ```
 
-Run the lint check:
+## Projects
+
+The module lints each **ESLint project** in your workspace separately. A
+project is a directory holding an ESLint config file:
+
+- flat config: `eslint.config.js`, `.mjs`, `.cjs`, `.ts`, `.mts` or `.cts`
+- legacy config: `.eslintrc`, `.eslintrc.js`, `.cjs`, `.json`, `.yaml` or
+  `.yml`
+
+A project is keyed by its path from the workspace root (`.` for the root).
+List the projects visible from where you stand:
 
 ```sh
-dagger check              # run every check in the workspace
-dagger check eslint:lint  # just the ESLint check
+dagger list eslint-projects -a
 ```
 
-Fix linting issues — returns a changeset; approve it to apply the fixes to
-your workspace (or pass `-y` to auto-apply):
+Discovery scans the whole workspace once, reading only file names and
+config text; it never runs ESLint or Node, so listing stays fast, and what is
+a project does not depend on where you run `dagger`. That has limits:
+
+- `node_modules` directories are never searched.
+- A config inside a directory that the **nearest** enclosing config ignores
+  globally is not a project, and neither is anything below it. A config in
+  between starts a fresh scope: a grandparent's ignores do not reach past
+  it. This is how ESLint 10 walks a tree. ESLint 9 and 8 (flat config) apply
+  only the config found from where they run, so the module's split into
+  projects gives the same answer as running ESLint inside each project
+  directory. Either way no file is linted by nobody, and none twice.
+- Only literal string patterns are read: an object holding just `ignores`
+  (and optionally `name`), or `globalIgnores([...])`. Patterns built at
+  runtime, ignores in an object that also has `files`, and legacy
+  `.eslintrc` `ignorePatterns` are not seen.
+- A config given only in `package.json` (`eslintConfig`), through `--config`,
+  or under another file name is not found.
+- A directory without its own config is linted as part of the project that
+  encloses it.
+
+Each project is linted from its own directory. Projects nested inside it are
+skipped there (`--ignore-pattern <nested>/**`) and linted on their own, with
+their own config, so no file is linted twice.
+
+## Working directory
+
+Which projects you see depends on where you run `dagger`:
+
+- **At a project root:** that project and the projects below it.
+- **Inside a project's subdirectory:** the enclosing project, plus any
+  projects below where you stand. A directory the project ignores counts as
+  its subdirectory, even if it holds a config of its own.
+- **Outside any project:** the projects below you.
+
+So you don't need a flag to lint the project you are working in:
 
 ```sh
-dagger api call eslint fix
+cd app/src && dagger check     # lints the app project
 ```
 
-## Working directory awareness
+## Dependencies and the ESLint version
 
-Functions run from your current working directory within the workspace. The
-whole workspace is mounted — so shared configuration like a root
-`.eslintrc.*` or `eslint.config.*` still resolves — but ESLint itself runs
-from the directory you invoke `dagger` from. Run from the workspace root to
-cover everything, or from a subdirectory to scope `lint` and `fix` to that
-subtree.
+Each project runs the ESLint its own dependencies install:
 
-If the workspace root holds no `package.json`, the dependency install is
-skipped and `npx` fetches ESLint on demand — a standalone eslint config
-works without a Node project.
+1. **Where:** dependencies are installed at the nearest workspace root at or
+   above the project (a `pnpm-workspace.yaml`, or a `package.json` with
+   `"workspaces"`), else the nearest directory with a lockfile, else the
+   nearest `package.json`. That tree is mounted, so `workspace:` and
+   `catalog:` dependencies and shared configs resolve.
+2. **With what:** the `packageManager` setting, or when it is empty, the
+   `"packageManager"` field of that `package.json`, else the lockfile
+   (`pnpm-lock.yaml`, `yarn.lock`, `bun.lock`/`bun.lockb`), else npm. pnpm
+   and yarn run through corepack, which is installed first on images that no
+   longer ship it (Node 25 and later), and use the version `packageManager`
+   names.
+3. **Cached:** only the files the install reads (every `package.json`,
+   lockfiles, `pnpm-workspace.yaml`, `.npmrc`, `.yarnrc*`, `.yarn/` releases,
+   plugins and patches, `patches/`, and the directories that `file:`,
+   `link:` and `portal:` dependencies point to) are mounted for the install,
+   so editing source does not re-run it. When a `package.json` marks a
+   dependency `injected`, or a local dependency lies outside the install root,
+   the install gets the full source instead. The package manager caches, the pnpm store and
+   corepack's downloads are cache volumes. Browser downloads (Playwright,
+   Puppeteer, Cypress) and git hook installs are skipped.
+4. **Which ESLint:** the nearest `node_modules/.bin/eslint` from the project
+   up to the install root, or `yarn eslint` under Yarn Plug'n'Play. If the
+   project doesn't install ESLint, the check fails and says so. ESLint runs
+   with its default (single-threaded) concurrency; projects are linted in
+   parallel with each other.
 
-## Customization
+A project with no `package.json` at or above it installs nothing, and `npx`
+fetches the latest ESLint, so a standalone ESLint config works without a Node
+project.
 
-The toolchain can be customized in your `dagger.json` to meet your needs:
+Lifecycle scripts run during the install without the source mounted. If one
+needs source files, pass `--ignore-scripts` in `installFlags`.
 
-```json
-{
-  "name": "my-module",
-  "engineVersion": "...",
-  "toolchains": [
-    {
-      "name": "eslint",
-      "source": "github.com/dagger/eslint@main",
-      "pin": "...",
-      "customizations": [
-        {
-          "argument": "baseImageAddress",
-          "default": "node:22"       # default: node:25-alpine; use any container image
-        },
-        {
-          "argument": "packageManager",
-          "default": "yarn"          # default: npm; alternatively use yarn, pnpm, or bun
-        }
-      ]
-    }
-  ]
+Failures name the project and the step: `install failed (pnpm install, exit
+1)` with the end of the installer's output, or `eslint failed (exit 1)` with
+ESLint's report.
+
+## Checks
+
+| Address                | Runs                              |
+| ---------------------- | --------------------------------- |
+| `eslint/projects/lint` | ESLint in each project (`@check`) |
+
+```sh
+dagger check                                  # every check in the workspace
+dagger check --eslint                         # every ESLint project
+dagger check eslint/projects/lint             # the same, by address
+dagger check --eslint-project=app             # one project (repeatable)
+dagger check --check lint                     # checks named lint, in every module
+dagger check -l --all --eslint                # list one line per project
+dagger check -l --all --eslint -f=cli         # ...as flags you can paste back
+```
+
+The selected projects are linted in parallel, and every failing project is
+reported.
+
+Run the check with `dagger check`, in CI especially: `dagger call` on a check
+function does not fail the command when the check fails.
+
+The flags for this module (see `dagger check --help`):
+
+| Flag                      | Selects                                |
+| ------------------------- | -------------------------------------- |
+| `--eslint`, `--by-eslint` | checks from this module                |
+| `--eslint-project=PATH`   | one project (repeatable)               |
+| `--eslint-projects`       | every project                          |
+| `--check NAME`            | checks with that name, in every module |
+
+The short flag `--eslint-project` stays as long as no other installed module
+has an item type with the same name. `dagger check --help` lists the flags in
+effect.
+
+## Fixing
+
+Each project has a `fix` function that runs `eslint --fix` and returns the
+changes as a `Changeset`, rooted at your working directory. It keeps the
+fixes even when problems ESLint cannot fix remain, and leaves those for `lint`
+to report. `fix` is not a generator, so it adds no check to `dagger check`.
+
+Apply a project's fixes from the CLI with a Dagger script (run it from the
+workspace root, since the changes are rooted where you run it):
+
+```sh
+dagger -c 'eslint | projects | get app | fix | export .'
+```
+
+## Using it from another module
+
+`projects(ws)` returns a collection. Use `keys`, `get(key:)` and
+`subset(keys:)` to select projects, and `batch` to run a function over the
+selection:
+
+```dang
+let projects = eslint.projects(ws)
+projects.keys                                    # ["app", "app/packages/ui"]
+run(projects.batch.lint(ws))                     # lint every project
+run(projects.subset(keys: ["app"]).batch.lint(ws))
+run(projects.get(key: "app").lint(ws))           # one project
+projects.get(key: "app").fix(ws)                 # its fixes, as a Changeset
+```
+
+A check called through a dependency returns a `Check` that has not run yet.
+Wrap it to run it and raise its failure:
+
+```dang
+let run(check: Check!): Void {
+  if (check.pass == false) {
+    raise check.error.message ?? "check failed"
+  }
+  null
 }
+```
+
+## Settings
+
+Set these in your workspace `dagger.toml`:
+
+```toml
+[modules.eslint]
+source = "github.com/dagger/eslint"
+settings.baseImageAddress = "node:22"            # default: node:25-alpine; any image with Node
+settings.packageManager = "pnpm"                 # default: "" (detect); npm, pnpm, yarn or bun
+settings.installFlags = ["--ignore-scripts"]     # default: []; appended to the install command
+settings.environment = ["NODE_OPTIONS=--max-old-space-size=4096"]  # default: []; KEY=VALUE for ESLint
+```
+
+Or from the CLI:
+
+```sh
+dagger settings eslint baseImageAddress node:22   # set
+dagger settings -u eslint baseImageAddress        # unset, back to the default
 ```

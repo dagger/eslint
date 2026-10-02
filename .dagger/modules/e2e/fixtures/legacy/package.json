@@ -1,0 +1,7 @@
+{
+  "name": "eslint-e2e-legacy",
+  "private": true,
+  "devDependencies": {
+    "eslint": "^8.57.0"
+  }
+}

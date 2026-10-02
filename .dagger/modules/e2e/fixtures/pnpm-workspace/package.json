@@ -1,0 +1,8 @@
+{
+  "name": "eslint-e2e-pnpm",
+  "private": true,
+  "packageManager": "pnpm@12.6.0",
+  "devDependencies": {
+    "eslint": "9.39.4"
+  }
+}

@@ -1,5 +1,10 @@
 """
 End-to-end checks for the eslint toolchain.
+
+The fixtures under `.dagger/modules/e2e/fixtures/` are ESLint projects: one
+clean, one failing, one enclosing a nested project, and a legacy `.eslintrc`
+project that installs its own ESLint. Some fail on purpose, so the checks here
+select them explicitly rather than running the whole collection.
 """
 type E2e {
   """
@@ -7,15 +12,380 @@ type E2e {
   """
   repo: String! = "https://github.com/dagger/hello-dagger"
 
+  let fixtures: String! = ".dagger/modules/e2e/fixtures"
+
+  let assert(condition: Boolean!, message: String!): Void {
+    if (condition == false) { raise message }
+    null
+  }
+
+  """
+  Run a check, raising its failure. A check called through a dependency comes
+  back as a Check that has not run.
+  """
+  let run(check: Check!): Void {
+    # Check.error is not null for a passing check when read from Dang, so ask
+    # pass first and read the message only on failure.
+    if (check.pass == false) {
+      raise check.error.message ?? "check failed"
+    }
+    null
+  }
+
+  """
+  The error a check fails with, or "unexpected success".
+  """
+  let failure(check: Check!): String! {
+    {
+      run(check)
+      "unexpected success"
+    } rescue {
+      err: Error => err.message
+    }
+  }
+
+  let same(got: [String!]!, want: [String!]!): Boolean! {
+    got.join("\n") == want.join("\n")
+  }
+
+  let fixture(name: String!): String! {
+    fixtures + "/" + name
+  }
+
   """
   Run the eslint toolchain against a real-world repository.
 
-  This pulls the hello-dagger repo, exposes it as a Workspace, and runs
-  the eslint `lint` check against it end-to-end.
+  This pulls the hello-dagger repo, exposes it as a Workspace, and lints its
+  ESLint projects end-to-end.
   """
   lintHelloDagger: Void @check {
     let ws = git(repo).head.tree.asWorkspace
+    let projects = eslint.projects(ws)
+    assert(same(projects.keys, ["."]), "hello-dagger is not one root project: " + projects.keys.join(", "))
+    run(projects.batch.lint(ws))
+  }
 
-    eslint(ws).lint
+  """
+  Discovery finds every config root, workspace-root-relative and sorted, from
+  any working directory.
+  """
+  discoveryCheck(ws: Workspace!): Void @check {
+    let root = ws.withWorkdir(".")
+    let all = eslint.projects(root).keys
+    # parent/ignored-template and parent/lib/vendor/pkg hold configs too, but
+    # parent's global ignores cover them.
+    let expected = [
+      fixture("broken-install"),
+      fixture("clean"),
+      fixture("failing"),
+      fixture("legacy/src"),
+      fixture("no-eslint"),
+      fixture("parent"),
+      fixture("parent/nested"),
+      fixture("pnpm-workspace/packages/app"),
+    ]
+    assert(same(all, expected), "unexpected projects: " + all.join(", "))
+
+    # A project root sees itself and what is below it, not its enclosing one.
+    let parent = eslint.projects(root.withWorkdir(fixture("parent"))).keys
+    assert(
+      same(parent, [fixture("parent"), fixture("parent/nested")]),
+      "discovery from a project root: " + parent.join(", "),
+    )
+    let nested = eslint.projects(root.withWorkdir(fixture("parent/nested"))).keys
+    assert(same(nested, [fixture("parent/nested")]), "discovery from a nested root: " + nested.join(", "))
+
+    # Inside a project's subdirectory, the enclosing project is the only one
+    # visible, and a bare batch lints exactly it.
+    let lib = root.withWorkdir(fixture("parent/lib"))
+    let inside = eslint.projects(lib).keys
+    assert(same(inside, [fixture("parent")]), "discovery inside a project: " + inside.join(", "))
+    run(eslint.projects(lib).batch.lint(lib))
+
+    # Inside a directory parent's global ignores cover, which holds a config
+    # of its own, discovery still answers for the whole workspace: that
+    # directory is no project, and the enclosing parent is selected.
+    let template = root.withWorkdir(fixture("parent/ignored-template"))
+    let ignoredHere = eslint.projects(template).keys
+    assert(
+      same(ignoredHere, [fixture("parent")]),
+      "discovery inside an ignored directory: " + ignoredHere.join(", "),
+    )
+    run(eslint.projects(template).batch.lint(template))
+
+    # Outside any project, only the projects below are visible. The legacy
+    # directory holds a package.json but no config.
+    let legacy = eslint.projects(root.withWorkdir(fixture("legacy"))).keys
+    assert(same(legacy, [fixture("legacy/src")]), "discovery above a project: " + legacy.join(", "))
+
+    # Configs shipped inside node_modules are not projects.
+    let vendored = directory
+      .withNewFile("app/eslint.config.mjs", "export default [];\n")
+      .withNewFile("app/node_modules/dep/eslint.config.js", "export default [];\n")
+      .withNewFile("app/node_modules/dep/.eslintrc.json", "{}\n")
+      .withNewFile("node_modules/other/.eslintrc.js", "module.exports = {};\n")
+      .asWorkspace
+    let apps = eslint.projects(vendored).keys
+    assert(same(apps, ["app"]), "discovery entered node_modules: " + apps.join(", "))
+    null
+  }
+
+  """
+  get returns items by key, and a subset holds only its keys.
+  """
+  collectionCheck(ws: Workspace!): Void @check {
+    let projects = eslint.projects(ws.withWorkdir("."))
+    assert(projects.get(key: fixture("clean")).path == fixture("clean"), "get returned the wrong project")
+
+    let subset = projects.subset(keys: [fixture("parent"), fixture("clean")])
+    # A subset keeps the collection's order, whatever order it was asked in.
+    assert(same(subset.keys, [fixture("clean"), fixture("parent")]), "subset keys: " + subset.keys.join(", "))
+    assert(subset.get(key: fixture("parent")).path == fixture("parent"), "get missed a subset key")
+    let outside = {
+      subset.get(key: fixture("failing")).path
+    } rescue {
+      err: Error => "rejected: " + err.message
+    }
+    assert(outside.hasPrefix("rejected: "), "get found a key outside the subset")
+    let unknown = {
+      projects.subset(keys: ["nope"]).keys.join(", ")
+    } rescue {
+      err: Error => "rejected: " + err.message
+    }
+    assert(unknown.hasPrefix("rejected: "), "subset accepted an unknown key")
+    assert(projects.subset(keys: []).keys.length == 0, "empty subset was not empty")
+    null
+  }
+
+  """
+  A subset batch lints only its keys: the clean projects pass even though
+  failing ones are in the collection.
+  """
+  batchCheck(ws: Workspace!): Void @check {
+    let projects = eslint.projects(ws.withWorkdir("."))
+    run(
+      projects
+        .subset(keys: [
+          fixture("clean"),
+          fixture("parent"),
+          fixture("legacy/src"),
+          fixture("pnpm-workspace/packages/app"),
+        ])
+        .batch
+        .lint(ws),
+    )
+    null
+  }
+
+  """
+  A failing project fails its own check and every batch it is in, and a batch
+  reports each failing project.
+  """
+  lintFailureCheck(ws: Workspace!): Void @check {
+    let projects = eslint.projects(ws.withWorkdir("."))
+    let own = failure(projects.get(key: fixture("failing")).lint(ws))
+    assert(
+      own.contains(fixture("failing") + ": eslint failed (exit 1)") and own.contains("prefer-const"),
+      "the failing project's error did not name it and ESLint's findings: " + own,
+    )
+
+    let batch = failure(
+      projects.subset(keys: [fixture("clean"), fixture("failing")]).batch.lint(ws),
+    )
+    assert(batch.contains(fixture("failing")), "the batch did not name the failing project: " + batch)
+    assert(batch.contains(fixture("clean") + ":") == false, "the batch blamed the clean project: " + batch)
+
+    let both = failure(
+      projects.subset(keys: [fixture("failing"), fixture("parent/nested")]).batch.lint(ws),
+    )
+    assert(
+      both.contains(fixture("failing")) and both.contains(fixture("parent/nested")),
+      "the batch did not report every failure: " + both,
+    )
+    null
+  }
+
+  """
+  A project leaves its nested projects to their own lint: parent passes
+  although the project nested in it fails.
+  """
+  nestedCheck(ws: Workspace!): Void @check {
+    let projects = eslint.projects(ws.withWorkdir("."))
+    run(projects.get(key: fixture("parent")).lint(ws))
+    let nested = failure(projects.get(key: fixture("parent/nested")).lint(ws))
+    assert(nested.contains("eslint failed (exit 1)"), "the nested project passed: " + nested)
+    null
+  }
+
+  """
+  fix returns ESLint's fixes, rooted at the caller's location, even when
+  problems it cannot fix remain.
+  """
+  fixCheck(ws: Workspace!): Void @check {
+    let root = ws.withWorkdir(".")
+    let failing = eslint.projects(root).get(key: fixture("failing"))
+
+    let fixed = failing.fix(root)
+    assert(
+      same(fixed.modifiedPaths, [fixture("failing/index.js")]),
+      "fix from the root changed: " + fixed.modifiedPaths.join(", "),
+    )
+    assert(
+      fixed.after.file(fixture("failing/index.js")).contents.contains("const fixable"),
+      "fix did not apply prefer-const",
+    )
+
+    let inside = failing.fix(root.withWorkdir(fixture("failing")))
+    assert(
+      same(inside.modifiedPaths, ["index.js"]),
+      "fix from the project changed: " + inside.modifiedPaths.join(", "),
+    )
+
+    assert(eslint.projects(root).get(key: fixture("clean")).fix(root).isEmpty, "fix changed a clean project")
+    null
+  }
+
+  """
+  Discovery drops configs that the nearest enclosing config's global ignores
+  cover, as ESLint 10 does when it walks the tree: an ignored directory is
+  pruned with everything below it, but a config in between starts a fresh
+  scope that the grandparent's ignores do not reach. Only literal patterns
+  are read: ignores-only objects (with an optional name) and
+  globalIgnores([...]), with "!" re-including.
+  """
+  ignoresCheck: Void @check {
+    let config = ```
+      import { defineConfig, globalIgnores } from "eslint/config";
+      export default defineConfig([
+        globalIgnores(["templates/*", "!templates/kept", "**/dist/**", "**/snapshots/**"]),
+        { name: "generated", ignores: ['gen-*'] },
+        { files: ["**/*.js"], ignores: ["scoped/**"] },
+      ]);
+    ```
+    let empty = "export default [];\n"
+    let ws = directory
+      .withNewFile("eslint.config.mjs", config)
+      .withNewFile("templates/react/eslint.config.js", empty)
+      .withNewFile("templates/react/sub/eslint.config.js", empty)
+      .withNewFile("templates/kept/eslint.config.js", empty)
+      .withNewFile("gen-client/eslint.config.js", empty)
+      .withNewFile("scoped/eslint.config.js", empty)
+      .withNewFile("snapshots/eslint.config.js", empty)
+      .withNewFile("pkg/eslint.config.js", empty)
+      .withNewFile("pkg/snapshots/eslint.config.js", empty)
+      .withNewFile("packages/a/.eslintrc.json", "{}\n")
+      .withNewFile("packages/a/dist/eslint.config.js", empty)
+      .asWorkspace
+    let keys = eslint.projects(ws).keys
+    # pkg/snapshots and packages/a/dist sit below a config of their own,
+    # so the root's ignores do not decide for them.
+    assert(
+      same(keys, [".", "packages/a", "packages/a/dist", "pkg", "pkg/snapshots", "scoped", "templates/kept"]),
+      "global ignores were not applied as ESLint 10 does: " + keys.join(", "),
+    )
+
+    # The answer does not depend on where dagger runs: inside an ignored
+    # directory, the root project is selected.
+    let inside = eslint.projects(ws.withWorkdir("templates/react/sub")).keys
+    assert(same(inside, ["."]), "discovery inside an ignored directory: " + inside.join(", "))
+    null
+  }
+
+  """
+  No file is linted by nobody and none twice when a grandparent's global
+  ignores cover a directory below a nested config, on ESLint 10 (fetched by
+  npx without a package.json) and ESLint 9 (installed): the nested
+  project's files are linted by their own project only.
+  """
+  nestedIgnoresCheck: Void @check {
+    let base = directory
+      .withNewFile("eslint.config.mjs", "export default [{ ignores: [\"**/snapshots/**\"] }, { rules: { eqeqeq: \"error\" } }];\n")
+      .withNewFile("code.js", "export const root = 1 === 1;\n")
+      .withNewFile("pkg/eslint.config.mjs", "export default [{ rules: { \"no-var\": \"error\" } }];\n")
+      .withNewFile("pkg/code.js", "export const pkg = 1;\n")
+      .withNewFile("pkg/snapshots/eslint.config.mjs", "export default [{ rules: { camelcase: \"error\" } }];\n")
+      .withNewFile("pkg/snapshots/code.js", "var snake_case = 1;\nexport { snake_case };\n")
+    let eslint10 = base.asWorkspace
+    let eslint9 = base
+      .withNewFile("package.json", "{ \"private\": true, \"devDependencies\": { \"eslint\": \"9.39.5\" } }\n")
+      .asWorkspace
+    nestedIgnores(eslint10, "ESLint 10")
+    nestedIgnores(eslint9, "ESLint 9")
+    null
+  }
+
+  let nestedIgnores(ws: Workspace!, version: String!): Void {
+    let projects = eslint.projects(ws)
+    assert(
+      same(projects.keys, [".", "pkg", "pkg/snapshots"]),
+      version + " projects: " + projects.keys.join(", "),
+    )
+    run(projects.get(key: ".").lint(ws))
+    run(projects.get(key: "pkg").lint(ws))
+    let snapshots = failure(projects.get(key: "pkg/snapshots").lint(ws))
+    assert(
+      snapshots.contains("camelcase") and snapshots.contains("no-var") == false,
+      version + ": pkg/snapshots was not linted, or not with its own config: " + snapshots,
+    )
+    null
+  }
+
+  """
+  Failures name the project and the step that failed: the install, with its
+  command, or ESLint itself, which says so when the project does not install
+  it.
+  """
+  stepFailureCheck(ws: Workspace!): Void @check {
+    let root = ws.withWorkdir(".")
+    let broken = failure(
+      eslint.projects(root).get(key: fixture("broken-install")).lint(ws),
+    )
+    assert(
+      broken.contains(fixture("broken-install") + ": install failed (npm install, exit 1)")
+        and broken.contains("workspace:"),
+      "an install failure was not reported as one: " + broken,
+    )
+    let flagged = failure(
+      eslint(installFlags: ["--ignore-scripts"]).projects(root).get(key: fixture("broken-install")).lint(ws),
+    )
+    assert(flagged.contains("(npm install --ignore-scripts, exit 1)"), "installFlags were not used: " + flagged)
+
+    let missing = failure(
+      eslint.projects(root).get(key: fixture("no-eslint")).lint(ws),
+    )
+    assert(
+      missing.contains("eslint is not installed") and missing.contains(fixture("no-eslint") + "/package.json"),
+      "a project without ESLint did not fail clearly: " + missing,
+    )
+
+    # An explicit packageManager wins over detection: corepack refuses yarn
+    # in a project that declares pnpm.
+    let app = fixture("pnpm-workspace/packages/app")
+    let forced = failure(
+      eslint(packageManager: "yarn").projects(root).get(key: app).lint(ws),
+    )
+    assert(
+      forced.contains(app + ": install failed (yarn install, exit"),
+      "the packageManager setting did not win: " + forced,
+    )
+    null
+  }
+
+  """
+  The environment setting reaches ESLint.
+  """
+  environmentCheck: Void @check {
+    let config = ```
+      if (process.env.ESLINT_E2E !== "on") throw new Error("ESLINT_E2E is not set");
+      export default [];
+    ```
+    let ws = directory
+      .withNewFile("eslint.config.mjs", config)
+      .withNewFile("index.js", "export const ok = true;\n")
+      .asWorkspace
+    let unset = failure(eslint.projects(ws).batch.lint(ws))
+    assert(unset.contains("ESLINT_E2E is not set"), "the config did not see the missing variable: " + unset)
+    run(eslint(environment: ["ESLINT_E2E=on"]).projects(ws).batch.lint(ws))
+    null
   }
 }
