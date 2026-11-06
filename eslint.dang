@@ -142,7 +142,15 @@ type Eslint {
   dir-relative directory rel. Later patterns win, so "!" re-includes.
   """
   let ignores(ws: Workspace!, dir: String!, rel: String!): Boolean! {
-    let patterns = globalIgnores(ws, dir)
+    matchesIgnores(globalIgnores(ws, dir), rel)
+  }
+
+  """
+  Whether ignore patterns, relative to a config's directory, cover the
+  path rel below it, or a directory holding it. Later patterns win, so "!"
+  re-includes.
+  """
+  let matchesIgnores(patterns: [String!]!, rel: String!): Boolean! {
     if (patterns.length == 0) {
       false
     } else {
@@ -167,24 +175,67 @@ type Eslint {
   Patterns built at runtime are not seen.
   """
   let globalIgnores(ws: Workspace!, dir: String!): [String!]! {
-    let prefix = if (dir == ".") { "" } else { dir + "/" }
-    let files = ws.glob(prefix + "eslint.config.*").filter { file =>
-      flatConfigNames.any { name => file.trimPrefix("/").trimPrefix("./") == prefix + name }
-    }
+    let file = configFile(ws, dir, flatConfigNames)
     let empty: [String!]! = []
-    if (files.length == 0) {
+    # An unreadable config ignores nothing here: its own project fails alone,
+    # naming it, rather than discovery failing for the whole workspace.
+    if (file == null or readFailure(ws, file ?? "") != null) {
       empty
     } else {
-      let text = ws.file("/" + files.takeLast(1).join("").trimPrefix("/").trimPrefix("./")).contents
+      let text = ws.file(file ?? "").contents
       let arrays = text.matchAll(
         `\{\s*(?:name\s*:\s*(?:'[^']*'|"[^"]*")\s*,\s*)?ignores\s*:\s*\[([^\]]*)\]\s*,?\s*\}`,
       ) + text.matchAll(`globalIgnores\(\s*\[([^\]]*)\]`)
-      arrays.reduce(empty) { acc, array =>
-        acc + array.captures.join("").matchAll(`'([^']*)'|"([^"]*)"`).map { literal =>
-          literal.captures.join("")
-        }
-      }
+      literals(arrays.map { array => array.captures.join("") })
     }
+  }
+
+  """
+  The string literals in pieces of config text.
+  """
+  let literals(texts: [String!]!): [String!]! {
+    let empty: [String!]! = []
+    texts.reduce(empty) { acc, text =>
+      acc + text.matchAll(`'([^']*)'|"([^"]*)"`).map { literal => literal.captures.join("") }
+    }
+  }
+
+  """
+  The workspace-absolute path of the first of names present in dir, in
+  that order, or null.
+  """
+  let configFile(ws: Workspace!, dir: String!, names: [String!]!): String {
+    let prefix = if (dir == ".") { "" } else { dir + "/" }
+    let present = (ws.glob(prefix + "eslint.config.*") + ws.glob(prefix + ".eslintrc*")).map { file =>
+      file.trimPrefix("/").trimPrefix("./")
+    }
+    let found = names.filter { name => present.contains(prefix + name) }
+    if (found.length == 0) { null } else { "/" + prefix + found[0]! }
+  }
+
+  """
+  Why the workspace-absolute file cannot be read, naming it, or null.
+  """
+  let readFailure(ws: Workspace!, file: String!): String {
+    {
+      ws.file(file).contents
+      null
+    } rescue {
+      err: Error => file.trimPrefix("/") + ": cannot read the ESLint config: " + err.message
+    }
+  }
+
+  """
+  The pinned image the report indexer runs in, whatever the base: it needs
+  only Node, and the base need not have it at a version the indexer knows.
+  """
+  let indexerImage: String! = "node:24.11.1-alpine3.22"
+
+  """
+  Legacy config file names, in the order ESLint 8 prefers them.
+  """
+  let legacyConfigNames: [String!]! {
+    [".eslintrc.js", ".eslintrc.cjs", ".eslintrc.yaml", ".eslintrc.yml", ".eslintrc.json", ".eslintrc"]
   }
 
   """
@@ -315,10 +366,34 @@ type Eslint {
     }
   }
 
+  """
+  items in byte order. A merge sort: file lists can be long.
+  """
   let sorted(items: [String!]!): [String!]! {
-    let empty: [String!]! = []
-    items.reduce(empty) { acc, item =>
-      acc.takeWhile { x => x <= item } + [item] + acc.dropWhile { x => x <= item }
+    if (items.length < 2) {
+      items
+    } else {
+      let half = items.length / 2
+      mergeSorted(sorted(items.takeFirst(half)), sorted(items.dropFirst(half)))
+    }
+  }
+
+  """
+  Merges two byte-ordered lists into one.
+  """
+  let mergeSorted(a: [String!]!, b: [String!]!): [String!]! {
+    let i = 0
+    let j = 0
+    (a + b).map { unused =>
+      if (j == b.length or (i < a.length and a[i]! <= b[j]!)) {
+        let item = a[i]!
+        i += 1
+        item
+      } else {
+        let item = b[j]!
+        j += 1
+        item
+      }
     }
   }
 }
@@ -350,18 +425,18 @@ type EslintProjects @collection {
   }
 
   """
-  Lint the selected projects.
+  Lint the projects in this collection, each with one ESLint run over its
+  whole tree, and report every failing project. A plain helper, not a check:
+  dagger check runs one check per file instead.
   """
-  lint(ws: Workspace!): Void @check {
+  lint(ws: Workspace!): Void {
     # A selection over a list evaluates its elements concurrently, so every
     # project is linted in parallel and every failure is reported.
     let failures = paths.map { p => project(p) }.{{path, failure: lintFailure(ws)}}
       .filter { result => result.failure != null }
     if (failures.length > 0) {
       raise "ESLint failed in " + toString(failures.length) + " of " + toString(paths.length)
-        + " projects:\n" + failures.map { result =>
-        "- " + result.path + ": " + (result.failure ?? "")
-      }.join("\n")
+        + " projects:\n" + failures.map { result => "- " + (result.failure ?? "") }.join("\n")
     }
     null
   }
@@ -384,12 +459,27 @@ type EslintProject {
   let tool: Eslint!
 
   """
-  Lint this project.
+  Files in this project that ESLint lints, keyed by workspace path.
   """
-  lint(ws: Workspace!): Void @check {
+  files(ws: Workspace!): EslintFiles! {
+    # A project whose discovery fails has one file, its config, whose check
+    # reports why; other projects are unaffected.
+    let found = if (discoveryFailure(ws) == null) {
+      tool.sorted(lintableFiles(ws))
+    } else {
+      [tool.joinPath(".", configPath(ws).trimPrefix("/"))]
+    }
+    EslintFiles(paths: found, project: tool.project(path, roots))
+  }
+
+  """
+  Lint this whole project with one ESLint run, reporting every failing file.
+  A plain helper, not a check: dagger check runs one check per file instead.
+  """
+  lint(ws: Workspace!): Void {
     let failure = lintFailure(ws)
     if (failure != null) {
-      raise path + ": " + (failure ?? "")
+      raise failure ?? ""
     }
     null
   }
@@ -432,21 +522,237 @@ type EslintProject {
   }
 
   """
-  Why linting this project failed, naming the failing step, or null when it
-  passes.
+  Why linting this whole project failed, naming the failing step or files,
+  or null when it passes.
   """
   let lintFailure(ws: Workspace!): String {
-    let install = installFailure(ws)
-    if (install != null) {
-      install
+    let summary = lintFiles(ws, files(ws).paths, true).summary
+    if (summary == "") { null } else { summary }
+  }
+
+  """
+  One ESLint run and report shared by every selected file check in this
+  project, with a bounded result for each file.
+
+  The command depends only on the selection, never on which check asks, so
+  the engine runs it once for all of them. A whole selection lints the
+  project as ESLint walks it; a narrowed one names the selected files,
+  sorted. ESLint runs with any exit code and its JSON report goes to a file,
+  so no failure is raised here: an indexer, shared too, attributes the report
+  to the selected files.
+  """
+  let lintFiles(ws: Workspace!, keys: [String!]!, whole: Boolean!): EslintResults! {
+    # Keys arrive in discovery order; a narrowed run sorts them anyway, so
+    # its command never depends on the order a selection was made in.
+    let selected = if (whole) { keys } else { tool.sorted(keys.uniq) }
+    let discovery = discoveryFailure(ws)
+    let install = if (discovery == null) { installFailure(ws) } else { null }
+    if (discovery != null) {
+      EslintResults(paths: selected, failure: path + ": " + (discovery ?? ""), results: directory)
+    } else if (install != null) {
+      EslintResults(paths: selected, failure: path + ": " + (install ?? ""), results: directory)
     } else {
-      stepFailure(
-        "eslint failed",
-        "",
-        runtime(ws).withExec(eslint(ws), expect: ReturnType.ANY),
-        30,
+      let targets = if (whole) { wholeTargets } else {
+        selected.map { file => tool.relativePath(file, path) }
+      }
+      let executed = runtime(ws).withExec(
+        ["dagger-eslint", "--format", "json"] + targets,
+        expect: ReturnType.ANY,
+        redirectStdout: "/dagger-eslint-report.json",
+        redirectStderr: "/dagger-eslint-stderr.log",
       )
+      let indexed = container
+        .from(tool.indexerImage)
+        .withFile("/eslint/report.cjs", currentModule.source.file("helpers/eslint-report.cjs"))
+        .withFile("/eslint/report.json", executed.file("/dagger-eslint-report.json"))
+        .withFile("/eslint/stderr.log", executed.file("/dagger-eslint-stderr.log"))
+        .withNewFile(
+          "/eslint/selection.json",
+          JSON.encode(
+            selected.map { file => {{key: file, path: tool.containerPath(file)}} },
+          ),
+        )
+        .withExec([
+          "node", "/eslint/report.cjs",
+          "--report", "/eslint/report.json",
+          "--stderr", "/eslint/stderr.log",
+          "--selection", "/eslint/selection.json",
+          "--exit-code", toString(executed.exitCode),
+          "--project", path,
+          "--root", "/src",
+          "--output", "/eslint/results",
+        ])
+      EslintResults(paths: selected, failure: "", results: indexed.directory("/eslint/results"))
     }
+  }
+
+  """
+  Files ESLint lints in this project, workspace-root-relative. Found from
+  file names and config text only, so listing runs neither ESLint nor Node:
+
+  - the extensions ESLint lints by default (.js, .mjs and .cjs with a flat
+    config, .js with a legacy one), and the files that literal `files`
+    patterns in the config match (legacy: in its overrides);
+  - TypeScript, Vue, Svelte and Astro files when the config names their
+    ESLint plugin, unless a flat config's literal `files` pattern names that
+    extension;
+  - minus .gitignored files, node_modules, nested projects, the config's
+    literal global ignores (legacy: .eslintignore and ignorePatterns) and,
+    with a legacy config, dotfiles.
+
+  ESLint has the last word: a file it does not lint fails its check, saying
+  so, and errors in a file not listed here fail the project's checks.
+  """
+  let lintableFiles(ws: Workspace!): [String!]! {
+    let flat = tool.configFile(ws, path, tool.flatConfigNames) != null
+    let file = configPath(ws)
+    let text = ws.file(file).contents
+    let patterns = filePatterns(text, flat)
+    let patternExtensions = extensionsOf(patterns)
+    let defaults = if (flat) { ["js", "mjs", "cjs"] } else { ["js"] }
+    # A flat config that names an extension in its own files patterns may
+    # scope the plugin's preset to them; legacy presets bring overrides that
+    # apply whatever the config's own say.
+    let presets = presetExtensions(text).filter { ext =>
+      flat == false or patternExtensions.contains(ext) == false
+    }
+    let extensions = (defaults + presets + patternExtensions).uniq
+    let regexes = patterns.map { p => tool.globRegex(p) }
+    let ignores = if (flat) {
+      tool.globalIgnores(ws, path)
+    } else {
+      legacyIgnores(ws, text)
+    }
+    let tree = ws.directory(
+      tool.absolutePath(path),
+      include: extensions.map { ext => "**/*." + ext },
+      exclude: ["**/node_modules", ".git"] + nestedDirs,
+      gitignore: true,
+    )
+    let empty: [String!]! = []
+    extensions
+      .reduce(empty) { acc, ext => acc + tree.glob("**/*." + ext) }
+      .map { found => found.trimPrefix("/").trimPrefix("./").trimSuffix("/") }
+      .uniq
+      .filter { rel =>
+        let ext = rel.split(".").takeLast(1).join("")
+        let matched = defaults.contains(ext)
+          or presets.contains(ext)
+          or regexes.any { re => rel.containsMatch(`${re}`) }
+        let hidden = flat == false
+          and rel.split("/").any { segment => segment.hasPrefix(".") }
+          and rel.split("/").takeLast(1).join("") != ".eslintrc.js"
+        matched and hidden == false and tool.matchesIgnores(ignores, rel) == false
+      }
+      .map { rel => tool.joinPath(path, rel) }
+  }
+
+  """
+  The workspace-absolute path of this project's config: its flat config,
+  else its legacy one.
+  """
+  let configPath(ws: Workspace!): String! {
+    tool.configFile(ws, path, tool.flatConfigNames)
+      ?? tool.configFile(ws, path, tool.legacyConfigNames)
+        ?? tool.absolutePath(path)
+  }
+
+  """
+  Why this project's files cannot be discovered, naming the file, or null:
+  its config, its .eslintignore or its tree cannot be read.
+  """
+  let discoveryFailure(ws: Workspace!): String {
+    let config = tool.readFailure(ws, configPath(ws))
+    if (config != null) {
+      config
+    } else {
+      {
+        lintableFiles(ws)
+        null
+      } rescue {
+        err: Error => "cannot list the files of " + path + ": " + err.message
+      }
+    }
+  }
+
+  """
+  Directories of the projects nested in this one, relative to it.
+  """
+  let nestedDirs: [String!]! {
+    roots
+      .filter { dir => dir != path and tool.isBelow(dir, path) }
+      .map { dir => tool.relativePath(dir, path) }
+  }
+
+  """
+  The literal patterns of the `files` keys in config text that make ESLint
+  lint a file: negated patterns and ones ending in * do not. A legacy
+  pattern without a slash matches a base name at any depth.
+  """
+  let filePatterns(text: String!, flat: Boolean!): [String!]! {
+    let values = text.matchAll(`(?:^|[^A-Za-z0-9_$])["']?files["']?\s*:\s*(\[[^\]]*\]|'[^']*'|"[^"]*")`)
+    tool
+      .literals(values.map { value => value.captures.join("") })
+      .filter { p => p != "" and p.hasPrefix("!") == false and p.hasSuffix("*") == false }
+      .map { p =>
+        if (flat == false and p.trimPrefix("./").contains("/") == false) { "**/" + p } else { p }
+      }
+      .uniq
+  }
+
+  """
+  The file extensions that patterns end in, braces expanded.
+  """
+  let extensionsOf(patterns: [String!]!): [String!]! {
+    let empty: [String!]! = []
+    patterns
+      .reduce(empty) { acc, p =>
+        acc + p.matchAll(`\.([A-Za-z0-9]+)$|\.\{([A-Za-z0-9,]+)\}$`).reduce(empty) { exts, m =>
+          exts + m.captures.join("").split(",")
+        }
+      }
+      .filter { ext => ext != "" }
+      .uniq
+  }
+
+  """
+  Extensions the ESLint plugins named in config text lint through their
+  presets, which set `files` patterns the config text does not show.
+  """
+  let presetExtensions(text: String!): [String!]! {
+    let empty: [String!]! = []
+    let ts = if (text.containsMatch(`typescript-eslint|eslint-config-typescript`)) {
+      ["ts", "tsx", "mts", "cts"]
+    } else { empty }
+    let vue = if (text.containsMatch(`eslint-plugin-vue|plugin:vue/`)) { ["vue"] } else { empty }
+    let svelte = if (text.containsMatch(`eslint-plugin-svelte|plugin:svelte/`)) { ["svelte"] } else { empty }
+    let astro = if (text.containsMatch(`eslint-plugin-astro|plugin:astro/`)) { ["astro"] } else { empty }
+    ts + vue + svelte + astro
+  }
+
+  """
+  A legacy project's ignore patterns, as globs relative to it: its
+  .eslintignore and the literal ignorePatterns of its config, read with
+  gitignore rules.
+  """
+  let legacyIgnores(ws: Workspace!, text: String!): [String!]! {
+    let prefix = if (path == ".") { "" } else { path + "/" }
+    let empty: [String!]! = []
+    let ignoreFile = if (hasFile(ws, prefix + ".eslintignore")) {
+      ws.file("/" + prefix + ".eslintignore").contents.split("\n").map { line => line.trimSpace }
+    } else { empty }
+    let configured = tool.literals(
+      text.matchAll(`["']?ignorePatterns["']?\s*:\s*\[([^\]]*)\]`).map { m => m.captures.join("") },
+    )
+    (ignoreFile + configured)
+      .filter { line => line != "" and line.hasPrefix("#") == false }
+      .map { line =>
+        let negated = line.hasPrefix("!")
+        let body = line.trimPrefix("!")
+        let anchored = body.hasPrefix("/") or body.trimSuffix("/").contains("/")
+        let glob = if (anchored) { body.trimPrefix("/") } else { "**/" + body }
+        (if (negated) { "!" } else { "" }) + glob
+      }
   }
 
   """
@@ -498,19 +804,23 @@ type EslintProject {
   }
 
   """
-  The ESLint command for this project. Nested projects are linted on their
-  own, with their own config, so they are ignored here.
+  The ESLint command for this whole project.
   """
   let eslint(ws: Workspace!): [String!]! {
-    let nested = roots
-      .filter { dir => dir != path and tool.isBelow(dir, path) }
-      .map { dir => tool.relativePath(dir, path) }
+    ["dagger-eslint"] + wholeTargets
+  }
+
+  """
+  ESLint arguments that lint this whole project. Nested projects are linted
+  on their own, with their own config, so they are ignored here.
+  """
+  let wholeTargets: [String!]! {
     let empty: [String!]! = []
-    let ignores = nested.reduce(empty) { args, dir => args + ["--ignore-pattern", dir + "/**"] }
+    let ignores = nestedDirs.reduce(empty) { args, dir => args + ["--ignore-pattern", dir + "/**"] }
     # A project whose files all belong to nested projects has nothing left to
     # lint, which ESLint otherwise reports as an error.
-    let unmatched = if (nested.length > 0) { ["--no-error-on-unmatched-pattern"] } else { empty }
-    ["dagger-eslint", "."] + ignores + unmatched
+    let unmatched = if (nestedDirs.length > 0) { ["--no-error-on-unmatched-pattern"] } else { empty }
+    ["."] + ignores + unmatched
   }
 
   """
@@ -810,5 +1120,98 @@ type EslintProject {
       .withEnvVariable("NO_COLOR", "1")
       .withNewFile("/usr/local/bin/dagger-eslint", runner, permissions: 493)
       .withWorkdir(tool.containerPath(path))
+  }
+}
+
+"""
+Files ESLint lints in one project, keyed by workspace path.
+"""
+type EslintFiles @collection {
+  """
+  File paths, relative to the workspace root.
+  """
+  paths: [String!]! @keys
+
+  """
+  Files selected in or out since the collection was discovered.
+  """
+  delta: CollectionDelta @delta
+
+  """
+  Whether the active selection removed files from this collection. Without a
+  delta (a direct call, outside dagger check), it counts as narrowed.
+  """
+  narrowed: Boolean! { delta == null or delta!.removedKeys.length > 0 }
+
+  let project: EslintProject!
+
+  """
+  The file at path.
+  """
+  file(path: String!): EslintFile! @get {
+    EslintFile(path: path, project: project)
+  }
+
+  """
+  Lint the files in this collection with one ESLint run, and report every
+  failing file. A plain helper, not a check: dagger check runs one check per
+  file instead.
+  """
+  lint(ws: Workspace!): Void {
+    if (paths.length > 0) {
+      let summary = project.lintFiles(ws, paths, narrowed == false).summary
+      if (summary != "") { raise summary }
+    }
+    null
+  }
+}
+
+"""
+A file ESLint lints.
+"""
+type EslintFile {
+  """
+  File path, relative to the workspace root.
+  """
+  path: String!
+
+  let project: EslintProject!
+
+  """
+  Lint this file.
+  """
+  lint(ws: Workspace!, selection: EslintFiles!): Void @check {
+    # selection is this project's file collection as dagger check filtered
+    # it, the same for every file check in the project, so they all share
+    # one ESLint run.
+    project.lintFiles(ws, selection.paths, selection.narrowed == false).assertPassed(path)
+  }
+}
+
+# One ESLint run's results, one bounded file per selected file, so a check
+# reads only its own however large the report is.
+type EslintResults {
+  let paths: [String!]!
+
+  # A failure shared by every file, found before ESLint ran, or "".
+  let failure: String!
+
+  # The indexer's output: file i holds the failure of paths[i], or nothing
+  # when it passed, and "summary" every failure.
+  let results: Directory!
+
+  let assertPassed(path: String!): Void {
+    # The rank is the file's position in the selection the indexer was given,
+    # so file names never become result paths.
+    let rank = paths.takeWhile { p => p != path }.length
+    if (rank == paths.length) { raise path + ": outside the ESLint file selection" }
+    if (failure != "") { raise failure }
+    let result = results.file(toString(rank)).contents
+    if (result != "") { raise result }
+    null
+  }
+
+  let summary: String! {
+    if (failure != "") { failure } else { results.file("summary").contents }
   }
 }
