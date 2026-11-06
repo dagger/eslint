@@ -62,7 +62,7 @@ type E2e {
     let ws = git(repo).head.tree.asWorkspace
     let projects = eslint.projects(ws)
     assert(same(projects.keys, ["."]), "hello-dagger is not one root project: " + projects.keys.join(", "))
-    run(projects.batch.lint(ws))
+    projects.lint(ws)
   }
 
   """
@@ -96,11 +96,11 @@ type E2e {
     assert(same(nested, [fixture("parent/nested")]), "discovery from a nested root: " + nested.join(", "))
 
     # Inside a project's subdirectory, the enclosing project is the only one
-    # visible, and a bare batch lints exactly it.
+    # visible, and linting the collection lints exactly it.
     let lib = root.withWorkdir(fixture("parent/lib"))
     let inside = eslint.projects(lib).keys
     assert(same(inside, [fixture("parent")]), "discovery inside a project: " + inside.join(", "))
-    run(eslint.projects(lib).batch.lint(lib))
+    eslint.projects(lib).lint(lib)
 
     # Inside a directory parent's global ignores cover, which holds a config
     # of its own, discovery still answers for the whole workspace: that
@@ -111,7 +111,7 @@ type E2e {
       same(ignoredHere, [fixture("parent")]),
       "discovery inside an ignored directory: " + ignoredHere.join(", "),
     )
-    run(eslint.projects(template).batch.lint(template))
+    eslint.projects(template).lint(template)
 
     # Outside any project, only the projects below are visible. The legacy
     # directory holds a package.json but no config.
@@ -158,49 +158,80 @@ type E2e {
   }
 
   """
-  A subset batch lints only its keys: the clean projects pass even though
+  Linting a subset lints only its keys: the clean projects pass even though
   failing ones are in the collection.
   """
-  batchCheck(ws: Workspace!): Void @check {
+  subsetCheck(ws: Workspace!): Void @check {
     let projects = eslint.projects(ws.withWorkdir("."))
-    run(
-      projects
-        .subset(keys: [
-          fixture("clean"),
-          fixture("parent"),
-          fixture("legacy/src"),
-          fixture("pnpm-workspace/packages/app"),
-        ])
-        .batch
-        .lint(ws),
-    )
+    projects
+      .subset(keys: [
+        fixture("clean"),
+        fixture("parent"),
+        fixture("legacy/src"),
+        fixture("pnpm-workspace/packages/app"),
+      ])
+      .lint(ws)
     null
   }
 
   """
-  A failing project fails its own check and every batch it is in, and a batch
-  reports each failing project.
+  A failing file fails its own check, and the project and collection helpers
+  report each failing file. Called directly, a file check is handed its
+  selection explicitly: only dagger check filters it.
   """
   lintFailureCheck(ws: Workspace!): Void @check {
     let projects = eslint.projects(ws.withWorkdir("."))
-    let own = failure(projects.get(key: fixture("failing")).lint(ws))
+    let failing = projects.get(key: fixture("failing"))
+    let index = fixture("failing/index.js")
+    let own = {
+      failing.lint(ws)
+      "unexpected success"
+    } rescue {
+      err: Error => err.message
+    }
     assert(
-      own.contains(fixture("failing") + ": eslint failed (exit 1)") and own.contains("prefer-const"),
-      "the failing project's error did not name it and ESLint's findings: " + own,
+      own.contains(index + ": ESLint found 2 errors") and own.contains("prefer-const"),
+      "the failing project's error did not name the file and ESLint's findings: " + own,
     )
 
-    let batch = failure(
-      projects.subset(keys: [fixture("clean"), fixture("failing")]).batch.lint(ws),
-    )
-    assert(batch.contains(fixture("failing")), "the batch did not name the failing project: " + batch)
-    assert(batch.contains(fixture("clean") + ":") == false, "the batch blamed the clean project: " + batch)
-
-    let both = failure(
-      projects.subset(keys: [fixture("failing"), fixture("parent/nested")]).batch.lint(ws),
-    )
+    let files = failing.files(ws)
     assert(
-      both.contains(fixture("failing")) and both.contains(fixture("parent/nested")),
-      "the batch did not report every failure: " + both,
+      same(files.keys, [fixture("failing/eslint.config.mjs"), index]),
+      "the failing project's files: " + files.keys.join(", "),
+    )
+    let leaf = failure(files.get(key: index).lint(ws, selection: files))
+    assert(
+      leaf.contains(index + ": ESLint found 2 errors") and leaf.contains("no-unused-vars"),
+      "the failing file's check did not report ESLint's findings: " + leaf,
+    )
+    run(
+      files.get(key: fixture("failing/eslint.config.mjs")).lint(ws, selection: files),
+    )
+    # A narrowed selection lints only its files.
+    let config = files.subset(keys: [fixture("failing/eslint.config.mjs")])
+    run(
+      config.get(key: fixture("failing/eslint.config.mjs")).lint(ws, selection: config),
+    )
+    config.lint(ws)
+
+    let subset = {
+      projects.subset(keys: [fixture("clean"), fixture("failing")]).lint(ws)
+      "unexpected success"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(subset.contains(index), "the subset did not name the failing file: " + subset)
+    assert(subset.contains(fixture("clean") + "/") == false, "the subset blamed the clean project: " + subset)
+
+    let both = {
+      projects.subset(keys: [fixture("failing"), fixture("parent/nested")]).lint(ws)
+      "unexpected success"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(
+      both.contains(index) and both.contains(fixture("parent/nested/index.js")),
+      "the subset did not report every failure: " + both,
     )
     null
   }
@@ -211,9 +242,17 @@ type E2e {
   """
   nestedCheck(ws: Workspace!): Void @check {
     let projects = eslint.projects(ws.withWorkdir("."))
-    run(projects.get(key: fixture("parent")).lint(ws))
-    let nested = failure(projects.get(key: fixture("parent/nested")).lint(ws))
-    assert(nested.contains("eslint failed (exit 1)"), "the nested project passed: " + nested)
+    projects.get(key: fixture("parent")).lint(ws)
+    let nested = {
+      projects.get(key: fixture("parent/nested")).lint(ws)
+      "unexpected success"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(
+      nested.contains(fixture("parent/nested/index.js") + ": ESLint found 1 error"),
+      "the nested project passed: " + nested,
+    )
     null
   }
 
@@ -320,9 +359,14 @@ type E2e {
       same(projects.keys, [".", "pkg", "pkg/snapshots"]),
       version + " projects: " + projects.keys.join(", "),
     )
-    run(projects.get(key: ".").lint(ws))
-    run(projects.get(key: "pkg").lint(ws))
-    let snapshots = failure(projects.get(key: "pkg/snapshots").lint(ws))
+    projects.get(key: ".").lint(ws)
+    projects.get(key: "pkg").lint(ws)
+    let snapshots = {
+      projects.get(key: "pkg/snapshots").lint(ws)
+      "unexpected success"
+    } rescue {
+      err: Error => err.message
+    }
     assert(
       snapshots.contains("camelcase") and snapshots.contains("no-var") == false,
       version + ": pkg/snapshots was not linted, or not with its own config: " + snapshots,
@@ -337,22 +381,31 @@ type E2e {
   """
   stepFailureCheck(ws: Workspace!): Void @check {
     let root = ws.withWorkdir(".")
-    let broken = failure(
-      eslint.projects(root).get(key: fixture("broken-install")).lint(ws),
-    )
+    let broken = {
+      eslint.projects(root).get(key: fixture("broken-install")).lint(ws)
+      "unexpected success"
+    } rescue {
+      err: Error => err.message
+    }
     assert(
       broken.contains(fixture("broken-install") + ": install failed (npm install, exit 1)")
         and broken.contains("workspace:"),
       "an install failure was not reported as one: " + broken,
     )
-    let flagged = failure(
-      eslint(installFlags: ["--ignore-scripts"]).projects(root).get(key: fixture("broken-install")).lint(ws),
-    )
+    let flagged = {
+      eslint(installFlags: ["--ignore-scripts"]).projects(root).get(key: fixture("broken-install")).lint(ws)
+      "unexpected success"
+    } rescue {
+      err: Error => err.message
+    }
     assert(flagged.contains("(npm install --ignore-scripts, exit 1)"), "installFlags were not used: " + flagged)
 
-    let missing = failure(
-      eslint.projects(root).get(key: fixture("no-eslint")).lint(ws),
-    )
+    let missing = {
+      eslint.projects(root).get(key: fixture("no-eslint")).lint(ws)
+      "unexpected success"
+    } rescue {
+      err: Error => err.message
+    }
     assert(
       missing.contains("eslint is not installed") and missing.contains(fixture("no-eslint") + "/package.json"),
       "a project without ESLint did not fail clearly: " + missing,
@@ -361,9 +414,12 @@ type E2e {
     # An explicit packageManager wins over detection: corepack refuses yarn
     # in a project that declares pnpm.
     let app = fixture("pnpm-workspace/packages/app")
-    let forced = failure(
-      eslint(packageManager: "yarn").projects(root).get(key: app).lint(ws),
-    )
+    let forced = {
+      eslint(packageManager: "yarn").projects(root).get(key: app).lint(ws)
+      "unexpected success"
+    } rescue {
+      err: Error => err.message
+    }
     assert(
       forced.contains(app + ": install failed (yarn install, exit"),
       "the packageManager setting did not win: " + forced,
@@ -383,9 +439,356 @@ type E2e {
       .withNewFile("eslint.config.mjs", config)
       .withNewFile("index.js", "export const ok = true;\n")
       .asWorkspace
-    let unset = failure(eslint.projects(ws).batch.lint(ws))
+    let unset = {
+      eslint.projects(ws).lint(ws)
+      "unexpected success"
+    } rescue {
+      err: Error => err.message
+    }
     assert(unset.contains("ESLINT_E2E is not set"), "the config did not see the missing variable: " + unset)
-    run(eslint(environment: ["ESLINT_E2E=on"]).projects(ws).batch.lint(ws))
+    eslint(environment: ["ESLINT_E2E=on"]).projects(ws).lint(ws)
+    null
+  }
+
+  """
+  File discovery lists the files ESLint lints: its default extensions,
+  literal files patterns, and plugin presets' extensions, minus gitignored
+  files, node_modules, nested projects and literal ignores; for a legacy
+  config, .js, overrides patterns (base names at any depth), .eslintignore
+  and ignorePatterns, and no dotfiles.
+  """
+  filesCheck: Void @check {
+    let ws = directory
+      .withNewFile(".gitignore", "built.js\n")
+      .withNewFile(
+        "flat/eslint.config.mjs",
+        "export default [{ ignores: [\"gen/**\"] }, { files: [\"**/*.jsx\"], rules: {} }];\n",
+      )
+      .withNewFile("flat/a.js", "\n")
+      .withNewFile("flat/b.mjs", "\n")
+      .withNewFile("flat/c.cjs", "\n")
+      .withNewFile("flat/d.jsx", "\n")
+      .withNewFile("flat/e.ts", "\n")
+      .withNewFile("flat/built.js", "\n")
+      .withNewFile("flat/gen/x.js", "\n")
+      .withNewFile("flat/node_modules/m/x.js", "\n")
+      .withNewFile("flat/.hidden/h.js", "\n")
+      .withNewFile("flat/nested/eslint.config.mjs", "export default [];\n")
+      .withNewFile("flat/nested/n.js", "\n")
+      .withNewFile("ts/eslint.config.mjs", "import tseslint from \"typescript-eslint\";\nexport default tseslint.config(tseslint.configs.recommended);\n")
+      .withNewFile("ts/index.ts", "\n")
+      .withNewFile("ts/view.tsx", "\n")
+      .withNewFile("ts/page.vue", "\n")
+      .withNewFile(
+        "legacy/.eslintrc.json",
+        "{ \"root\": true, \"ignorePatterns\": [\"dist/\"], \"overrides\": [{ \"files\": [\"*.ts\"] }] }\n",
+      )
+      .withNewFile("legacy/.eslintignore", "# comment\nvendor\n")
+      .withNewFile("legacy/a.js", "\n")
+      .withNewFile("legacy/b.mjs", "\n")
+      .withNewFile("legacy/c.ts", "\n")
+      .withNewFile("legacy/sub/d.ts", "\n")
+      .withNewFile("legacy/dist/e.js", "\n")
+      .withNewFile("legacy/sub/vendor/f.js", "\n")
+      .withNewFile("legacy/.hidden/g.js", "\n")
+      .asWorkspace
+    let projects = eslint.projects(ws)
+    let flat = projects.get(key: "flat").files(ws).keys
+    assert(
+      same(flat, ["flat/.hidden/h.js", "flat/a.js", "flat/b.mjs", "flat/c.cjs", "flat/d.jsx", "flat/eslint.config.mjs"]),
+      "flat config files: " + flat.join(", "),
+    )
+    let ts = projects.get(key: "ts").files(ws).keys
+    assert(same(ts, ["ts/eslint.config.mjs", "ts/index.ts", "ts/view.tsx"]), "typescript-eslint files: " + ts.join(", "))
+    let legacy = projects.get(key: "legacy").files(ws).keys
+    assert(same(legacy, ["legacy/a.js", "legacy/c.ts", "legacy/sub/d.ts"]), "legacy config files: " + legacy.join(", "))
+    null
+  }
+
+  # Only the unindented CHECKS header counts.
+  let checkSummaryMatches(output: String!, passed: Int!, failed: Int!): Boolean! {
+    let headers = output.split("\n").filter { line =>
+      line.hasPrefix("CHECKS ") or line.hasPrefix("== CHECKS ==")
+    }
+    let expected = (if (failed > 0) { ["✘", toString(failed), "failed"] } else { [] })
+      + (if (passed > 0) { ["✔", toString(passed), "passed"] } else { [] })
+    headers.length == 1 and headers[0]!
+      .trimPrefix("== ")
+      .trimPrefix("CHECKS")
+      .trimPrefix(" ==")
+      .trimSpace
+      .split(" ")
+      .filter { word => word != "" } == expected
+  }
+
+  """
+  Exercise selection through the CLI: direct Dang calls do not apply the
+  engine's filtered collection view. The engine supplies its matching CLI.
+  """
+  let selectedCheck(
+    ws: Workspace!,
+    fixture: Directory!,
+    args: [String!]!,
+    passed: Int!,
+    failed: Int! = 0,
+    messages: [String!]! = [],
+  ): Void {
+    let result = cli(ws, fixture, ["--progress=report", "check", "--generated=false"] + args)
+    let output = result.stdout + result.stderr
+    assert((result.exitCode == 0) == (failed == 0), "unexpected check exit status:\n" + output)
+    assert(checkSummaryMatches(output, passed, failed), "unexpected Dagger check totals:\n" + output)
+    messages.map { message =>
+      assert(output.contains(message), "missing " + message + ":\n" + output)
+    }
+    null
+  }
+
+  """
+  The engine's CLI, run in an isolated session in a workspace holding
+  fixture, with this module installed as eslint and the given settings.
+  """
+  let cli(
+    ws: Workspace!,
+    fixture: Directory!,
+    args: [String!]!,
+    settings: String! = "",
+  ): Container! {
+    container
+      .from("alpine:3.23")
+      .withEnvVariable("NO_COLOR", "1")
+      .withDirectory("/source", ws.directory("/"))
+      .withDirectory("/work", fixture)
+      .withNewFile("/work/.git/HEAD", "ref: refs/heads/main\n")
+      .withNewFile("/work/dagger.toml", "[modules.eslint]\nsource = \"/source\"\n" + settings)
+      .withWorkdir("/work")
+      .withExec(["/dev/.dagger/dagger"] + args, expect: ReturnType.ANY, daggerInDaggerNewSession: true)
+  }
+
+  let lintRules: String! = "export default [{ rules: { \"no-unused-vars\": \"error\" } }];\n"
+
+  """
+  Two projects of three files each, plus their configs: ok1.js and ok2.js
+  pass, bad.js fails. ESLint comes from npx.
+  """
+  let selectionFixture: Directory! {
+    ["p1", "p2"].reduce(directory) { fixture, project =>
+      fixture
+        .withNewFile(project + "/eslint.config.mjs", lintRules)
+        .withNewFile(project + "/ok1.js", "export const ok1 = 1;\n")
+        .withNewFile(project + "/ok2.js", "export const ok2 = 2;\n")
+        .withNewFile(project + "/bad.js", "const unused = \"excluded file ran\";\n")
+    }
+  }
+
+  let selectionArgs: [String!]! {
+    ["p1/ok1.js", "p1/ok2.js", "p2/ok1.js", "p2/ok2.js"].map { file => "--eslint-file=" + file }
+  }
+
+  """
+  Selected files in two projects pass, and the failing files left out of
+  the selection do not run.
+  """
+  selectedFilesCheck(ws: Workspace!): Void @check {
+    selectedCheck(ws, selectionFixture, selectionArgs, passed: 4)
+  }
+
+  """
+  A selected failing file fails alone.
+  """
+  selectedFailureCheck(ws: Workspace!): Void @check {
+    selectedCheck(
+      ws,
+      selectionFixture,
+      selectionArgs + ["--eslint-file=p1/bad.js"],
+      passed: 4,
+      failed: 1,
+      messages: ["p1/bad.js: ESLint found 1 error", "no-unused-vars"],
+    )
+  }
+
+  """
+  A whole project selected runs every file in it, and only there.
+  """
+  selectedProjectCheck(ws: Workspace!): Void @check {
+    selectedCheck(
+      ws,
+      selectionFixture,
+      ["--eslint-project=p2"],
+      passed: 3,
+      failed: 1,
+      messages: ["p2/bad.js: ESLint found 1 error"],
+    )
+  }
+
+  """
+  A project whose install fails fails every selected file in it; the other
+  project still passes.
+  """
+  selectedSetupFailureCheck(ws: Workspace!): Void @check {
+    let fixture = selectionFixture.withNewFile(
+      "p2/package.json",
+      "{ \"private\": true, \"dependencies\": { \"not-in-a-workspace\": \"workspace:*\" } }\n",
+    )
+    selectedCheck(
+      ws,
+      fixture,
+      selectionArgs,
+      passed: 2,
+      failed: 2,
+      messages: ["p2: install failed (npm install, exit 1)"],
+    )
+  }
+
+  """
+  Errors in a file ESLint lints but discovery does not offer as a check (its
+  files pattern is not a literal) fail every check sharing the run.
+  """
+  selectedOutsideFailureCheck(ws: Workspace!): Void @check {
+    let fixture = directory
+      .withNewFile(
+        "p3/eslint.config.mjs",
+        "const jsx = \"**/*.jsx\";\nexport default [{ files: [jsx], rules: { \"no-unused-vars\": \"error\" } }];\n",
+      )
+      .withNewFile("p3/ok.js", "export const ok = 1;\n")
+      .withNewFile("p3/hidden.jsx", "const unused = 1;\n")
+    selectedCheck(
+      ws,
+      fixture,
+      ["--eslint-project=p3"],
+      passed: 0,
+      failed: 2,
+      messages: ["p3: ESLint found errors in files without a check: p3/hidden.jsx"],
+    )
+  }
+
+  let neverRanFixture: Directory! {
+    directory
+      .withNewFile(
+        "p4/eslint.config.mjs",
+        "const skip = \"skipped.js\";\nexport default [{ ignores: [skip] }, { rules: { \"no-unused-vars\": \"error\" } }];\n",
+      )
+      .withNewFile("p4/ok.js", "export const ok = 1;\n")
+      .withNewFile("p4/skipped.js", "export const skipped = 1;\n")
+  }
+
+  """
+  A selected file ESLint does not lint (an ignore built at runtime, which
+  discovery cannot read) fails rather than passing with nothing behind it,
+  whether the whole project runs or the file is named.
+  """
+  selectedNeverRanCheck(ws: Workspace!): Void @check {
+    selectedCheck(
+      ws,
+      neverRanFixture,
+      ["--eslint-project=p4"],
+      passed: 2,
+      failed: 1,
+      messages: ["p4/skipped.js: ESLint did not lint this file: it linted p4 without it"],
+    )
+    selectedCheck(
+      ws,
+      neverRanFixture,
+      ["--eslint-file=p4/ok.js", "--eslint-file=p4/skipped.js"],
+      passed: 1,
+      failed: 1,
+      messages: ["p4/skipped.js: ESLint did not lint this file: File ignored"],
+    )
+  }
+
+  """
+  The number of distinct exec spans in verbose plain progress output whose
+  command starts with prefix: dagger shows a deduplicated call once.
+  """
+  let execSpans(output: String!, prefix: String!): Int! {
+    output
+      .split("\n")
+      .filter { line => line.contains(" : ") and line.contains("withExec " + prefix) }
+      .map { line => line.split(" : ").takeFirst(1).join("").trimSpace }
+      .uniq
+      .length
+  }
+
+  """
+  Every selected file check of a project shares one ESLint run and one
+  indexer run: two projects, five checks, two of each, whether the projects
+  run whole or named files.
+  """
+  selectedOneRunPerProjectCheck(ws: Workspace!): Void @check {
+    [
+      ["--eslint-project=p1", "--eslint-project=p2"],
+      ["--eslint-file=p1/ok1.js", "--eslint-file=p1/ok2.js", "--eslint-file=p1/eslint.config.mjs", "--eslint-file=p2/ok1.js", "--eslint-file=p2/ok2.js"],
+    ].map { args =>
+      let result = cli(ws, selectionFixture, ["-vvv", "--progress=plain", "check", "--generated=false"] + args)
+      let output = result.stdout + result.stderr
+      let eslintRuns = execSpans(output, "dagger-eslint --format json")
+      let indexerRuns = execSpans(output, "node /eslint/report.cjs")
+      assert(
+        eslintRuns == 2 and indexerRuns == 2,
+        "expected one ESLint and one indexer run per project, got " + toString(eslintRuns) + " and "
+          + toString(indexerRuns) + " for " + args.join(" ") + ":\n" + output,
+      )
+    }
+    null
+  }
+
+  """
+  A project whose config cannot be read fails alone, naming the file, and
+  every other project still runs.
+  """
+  selectedUnreadableConfigCheck(ws: Workspace!): Void @check {
+    let fixture = directory
+      .withNewFile("p1/eslint.config.mjs", lintRules)
+      .withNewFile("p1/ok.js", "export const ok = 1;\n")
+      .withNewFile("broken/a.js", "export const a = 1;\n")
+      .withSymlink("missing.mjs", "broken/eslint.config.mjs")
+    selectedCheck(
+      ws,
+      fixture,
+      [],
+      passed: 2,
+      failed: 1,
+      # The report shows the failing check and the read that failed, but may
+      # hide the check's own message, which names the file the same way.
+      messages: ["eslint-file=broken/eslint.config.mjs", "/broken/eslint.config.mjs"],
+    )
+  }
+
+  """
+  Listing runs no container: with a base image that does not exist, a
+  project whose install would fail and one whose config cannot be read,
+  every file is still listed.
+  """
+  listingRunsNothingCheck(ws: Workspace!): Void @check {
+    let fixture = selectionFixture
+      .withNewFile(
+        "p2/package.json",
+        "{ \"private\": true, \"dependencies\": { \"not-in-a-workspace\": \"workspace:*\" } }\n",
+      )
+      .withNewFile("broken/a.js", "export const a = 1;\n")
+      .withSymlink("missing.mjs", "broken/eslint.config.mjs")
+    let result = cli(
+      ws,
+      fixture,
+      ["check", "-l", "--all", "--eslint", "-f=cli"],
+      settings: "settings.baseImageAddress = \"registry.invalid/no-such-image:never\"\n",
+    )
+    let output = result.stdout + result.stderr
+    assert(result.exitCode == 0, "listing failed:\n" + output)
+    let listed = output.split("\n").filter { line => line.contains("--eslint-file=") }.map { line =>
+      line.matchAll(`--eslint-file=(\S+)`).map { m => m.captures.join("") }.join("")
+    }
+    let expected = [
+      "broken/eslint.config.mjs",
+      "p1/bad.js",
+      "p1/eslint.config.mjs",
+      "p1/ok1.js",
+      "p1/ok2.js",
+      "p2/bad.js",
+      "p2/eslint.config.mjs",
+      "p2/ok1.js",
+      "p2/ok2.js",
+    ]
+    assert(same(listed, expected), "listed files: " + listed.join(", ") + "\n" + output)
     null
   }
 }

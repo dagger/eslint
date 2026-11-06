@@ -6,7 +6,7 @@ each project's own ESLint configuration and version.
 
 ## Requirements
 
-Requires Dagger v1.0.0-beta.15 or later.
+Requires Dagger v1.0.0-beta.22 or later.
 
 ## Install
 
@@ -54,6 +54,47 @@ a project does not depend on where you run `dagger`. That has limits:
 Each project is linted from its own directory. Projects nested inside it are
 skipped there (`--ignore-pattern <nested>/**`) and linted on their own, with
 their own config, so no file is linted twice.
+
+## Files
+
+Each project holds the **files** ESLint lints in it, keyed by their path from
+the workspace root. Each file is its own check. List them:
+
+```sh
+dagger check -l --all --eslint-project=app
+```
+
+Like projects, files are found from file names and config text only:
+listing (`dagger check -l`, `dagger list`) runs no container at all, so it
+installs nothing and runs neither ESLint nor Node. Files are:
+
+- the extensions ESLint lints by default: `.js`, `.mjs` and `.cjs` with a
+  flat config, `.js` with a legacy one;
+- files matched by the literal `files` patterns of the project's config (for
+  a legacy config, of its `overrides`, where a pattern without a slash
+  matches a file name at any depth);
+- `.ts`, `.tsx`, `.mts` and `.cts` files when the config names
+  `typescript-eslint` (or `@vue/eslint-config-typescript`), `.vue` files
+  when it names `eslint-plugin-vue`, and likewise `.svelte` and `.astro`,
+  since those plugins' presets set `files` patterns the config text does not
+  show. A flat config that names the extension in a literal `files` pattern
+  of its own is taken at its word instead, as it may scope the preset;
+- minus `.gitignore`d files, `node_modules`, nested projects and the
+  config's literal global ignores (for a legacy config: `.eslintignore`,
+  literal `ignorePatterns`, and dotfiles).
+
+ESLint has the last word, and a check never passes with nothing behind it:
+
+- A listed file ESLint does not lint (an ignore or a `files` pattern built
+  at runtime, a shared config's patterns) fails its check, saying `ESLint
+  did not lint this file`.
+- A file ESLint lints but discovery missed has no check. When the whole
+  project runs, errors in it fail every check of the project, naming the
+  file (`ESLint found errors in files without a check`).
+- A project whose config (or `.eslintignore`, or tree) cannot be read has
+  one file, its config, whose check fails naming it (`app/eslint.config.mjs:
+  cannot read the ESLint config`). Discovery carries on for every other
+  project.
 
 ## Working directory
 
@@ -108,28 +149,54 @@ project.
 Lifecycle scripts run during the install without the source mounted. If one
 needs source files, pass `--ignore-scripts` in `installFlags`.
 
-Failures name the project and the step: `install failed (pnpm install, exit
-1)` with the end of the installer's output, or `eslint failed (exit 1)` with
-ESLint's report.
+Failures name the file and ESLint's messages for it (`app/a.js: ESLint
+found 1 error`), or the project and the step that failed for all its files:
+`install failed (pnpm install, exit 1)` with the end of the installer's
+output, or `eslint failed (exit 2)` with the end of ESLint's.
 
 ## Checks
 
-| Address                | Runs                              |
-| ---------------------- | --------------------------------- |
-| `eslint/projects/lint` | ESLint in each project (`@check`) |
+| Address                      | Runs                           |
+| ---------------------------- | ------------------------------ |
+| `eslint/projects/files/lint` | ESLint on each file (`@check`) |
 
 ```sh
 dagger check                                  # every check in the workspace
-dagger check --eslint                         # every ESLint project
-dagger check eslint/projects/lint             # the same, by address
-dagger check --eslint-project=app             # one project (repeatable)
+dagger check --eslint                         # every file of every ESLint project
+dagger check eslint/projects/files/lint       # the same, by address
+dagger check --eslint-project=app             # every file of one project (repeatable)
+dagger check --eslint-file=app/src/index.js   # one file (repeatable)
 dagger check --check lint                     # checks named lint, in every module
-dagger check -l --all --eslint                # list one line per project
+dagger check -l --all --eslint                # list one line per file
 dagger check -l --all --eslint -f=cli         # ...as flags you can paste back
 ```
 
-The selected projects are linted in parallel, and every failing project is
-reported.
+### One ESLint run per project
+
+Each selected file has its own check, but all the checks of a project share
+one ESLint run: they call the same helper with the project's file
+collection as `dagger check` filtered it, so they build the same command,
+and the engine runs it once. Projects run in parallel, each with its own
+install and config.
+
+- With no file of the project selected out, the run lints the project as a
+  whole (`eslint .`, nested projects ignored), the same command `lint` on a
+  project runs.
+- Otherwise it names the selected files, sorted (`eslint a.js b.js`), and
+  files left out are not linted.
+
+ESLint runs with `--format json` and any exit code. Its report is indexed
+once, by a small Node script in a pinned `node:24.11.1-alpine3.22` image
+(not your base, which need not hold a Node it can run), into a small result
+per selected file, so each check reads only its
+own, however large the report. A file's check fails when ESLint reports an
+error in it, listing its messages (warnings do not fail it). Every selected
+file of the project fails together when the step before ESLint fails
+(`install failed (pnpm install, exit 1)`), when ESLint itself cannot run
+(`eslint failed (exit 2)`, such as a config that does not load, or `eslint
+is not installed`), or when the whole-project run finds errors in a file
+without a check. Logs belong to the check that started the shared run; the
+others share its result.
 
 Run the check with `dagger check`, in CI especially: `dagger call` on a check
 function does not fail the command when the check fails.
@@ -140,11 +207,11 @@ The flags for this module (see `dagger check --help`):
 | ------------------------- | -------------------------------------- |
 | `--eslint`, `--by-eslint` | checks from this module                |
 | `--eslint-project=PATH`   | one project (repeatable)               |
-| `--eslint-projects`       | every project                          |
+| `--eslint-file=PATH`      | one file (repeatable)                  |
 | `--check NAME`            | checks with that name, in every module |
 
-The short flag `--eslint-project` stays as long as no other installed module
-has an item type with the same name. `dagger check --help` lists the flags in
+The short flags `--eslint-project` and `--eslint-file` stay as long as no
+other installed module has an item type with the same name. `dagger check --help` lists the flags in
 effect.
 
 ## Fixing
@@ -163,17 +230,29 @@ dagger -c 'eslint | projects | get app | fix | export .'
 
 ## Using it from another module
 
-`projects(ws)` returns a collection. Use `keys`, `get(key:)` and
-`subset(keys:)` to select projects, and `batch` to run a function over the
-selection:
+`projects(ws)` returns a collection of projects, and a project's
+`files(ws)` a collection of its files. Use `keys`, `get(key:)` and
+`subset(keys:)` to select them. `lint` on a collection of projects, on a
+project and on a collection of files is a plain function, not a check: it
+raises one error listing every failing file.
 
 ```dang
 let projects = eslint.projects(ws)
 projects.keys                                    # ["app", "app/packages/ui"]
-run(projects.batch.lint(ws))                     # lint every project
-run(projects.subset(keys: ["app"]).batch.lint(ws))
-run(projects.get(key: "app").lint(ws))           # one project
+projects.lint(ws)                                # lint every project
+projects.subset(keys: ["app"]).lint(ws)
+projects.get(key: "app").lint(ws)                # one whole project
+let files = projects.get(key: "app").files(ws)
+files.subset(keys: ["app/a.js", "app/b.js"]).lint(ws)  # named files, one run
 projects.get(key: "app").fix(ws)                 # its fixes, as a Changeset
+```
+
+There is no `batch` namespace. A file's `lint` is the check; called
+directly, it takes the file collection to share its run with as
+`selection`, which only `dagger check` filters for you:
+
+```dang
+run(files.get(key: "app/a.js").lint(ws, selection: files))
 ```
 
 A check called through a dependency returns a `Check` that has not run yet.
